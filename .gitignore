@@ -1,0 +1,9 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+
+# Raw pulls (keep the folder, ignore its contents)
+/data/*
+!/data/.gitkeep
