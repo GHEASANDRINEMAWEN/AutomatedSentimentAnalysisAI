@@ -21,7 +21,7 @@ try:
 except (AttributeError, ValueError):
     pass
 
-from core import sentiment, store
+from core import relevance, sentiment, store
 
 PROVIDERS = {
     "youtube": "providers.youtube.adapter",
@@ -42,17 +42,47 @@ def date_range(records):
     return (stamps[0], stamps[-1])
 
 
+def year_counts(records, year_start=2015, year_end=2026):
+    """Return per-year (total, kept) counts, covering year_start..year_end plus
+    any other years that show up in the data."""
+    from collections import defaultdict
+
+    total = defaultdict(int)
+    kept = defaultdict(int)
+    for rec in records:
+        stamp = rec.get("timestamp") or ""
+        year = stamp[:4] if stamp[:4].isdigit() else "????"
+        total[year] += 1
+        if rec.get("relevance_kept"):
+            kept[year] += 1
+
+    years = {str(y) for y in range(year_start, year_end + 1)} | set(total)
+    return total, kept, sorted(years)
+
+
 def print_summary(provider: str, country: str, records, added: int):
+    keep = relevance.kept(records)
     print()
     print("=" * 72)
     print(f"Provider: {provider}    Country: {country}")
-    print(f"Comments pulled : {len(records)}")
-    print(f"New stored      : {added}   (duplicates skipped: {len(records) - added})")
+    print(f"Comments pulled        : {len(records)}")
+    print(f"Passed relevance filter: {len(keep)}   "
+          f"(filtered out: {len(records) - len(keep)})")
+    print(f"New stored             : {added}   "
+          f"(duplicates skipped: {len(records) - added})")
     lo, hi = date_range(records)
-    print(f"Date range      : {lo}  ->  {hi}")
+    print(f"Full date range        : {lo}  ->  {hi}")
+
     print("-" * 72)
-    print("Sample rows (sentiment / text / url):")
-    for rec in records[:5]:
+    print("Comments per year (total / kept):")
+    total, kept_by_year, years = year_counts(records)
+    for year in years:
+        bar = "#" * min(total[year] // 10, 50)
+        print(f"  {year}: {total[year]:5d} / {kept_by_year[year]:5d} kept  {bar}")
+
+    print("-" * 72)
+    print("10 sample KEPT rows (sentiment / text / url):")
+    for rec in keep[:10]:
         text = " ".join((rec.get("text") or "").split())
         if len(text) > 90:
             text = text[:87] + "..."
@@ -117,13 +147,15 @@ def main():
     provider = load_provider(args.provider)
     print(f"Fetching {args.provider} for {args.country!r} ...")
     records = provider.fetch(args.country, max_results=args.max_results)
-    print(f"Fetched {len(records)} records. Scoring with VADER ...")
+    print(f"Fetched {len(records)} records. Marking relevance + scoring with VADER ...")
+    relevance.mark(records)   # mark, don't drop — filtered rows stay for review
     sentiment.score(records)
     added = store.append(records)
     rows = store.export_csv()  # regenerate the CSV mirror from the full store
     print_summary(args.provider, args.country, records, added)
     print(f"\nCSV updated: {store.CSV_FILE}  ({rows} rows total)")
-    print_table(records, limit=20)
+    # Aligned view of the KEPT (relevant) rows for quick eyeballing.
+    print_table(relevance.kept(records), limit=20)
 
 
 if __name__ == "__main__":

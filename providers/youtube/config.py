@@ -1,15 +1,27 @@
-"""YouTube-specific settings: per-country search queries and quota caps.
+"""YouTube-specific settings: per-country search queries, year span, quota caps.
 
 Add a new country by adding an entry to QUERIES (and optionally REGION_CODES).
 No code changes needed elsewhere.
 """
 
-# Search queries per country. Start with South Africa.
+# Tourism-specific search queries per country. These target travel/destination
+# content (guides, vlogs, itineraries, safety) rather than generic mentions, so
+# the comments we pull are more likely to be actual tourism sentiment.
 QUERIES = {
     "South Africa": [
-        "South Africa travel",
-        "visit South Africa",
-        "South Africa tourism",
+        "Cape Town travel guide",
+        "things to do in South Africa",
+        "is South Africa safe for tourists",
+        "South Africa travel vlog",
+        "visiting Johannesburg",
+        "Kruger safari",
+        "South Africa itinerary",
+        "Garden Route road trip",
+        "Cape Town vlog",
+        "South Africa holiday",
+        "best places to visit South Africa",
+        "Durban travel",
+        "South Africa tourist tips",
     ],
 }
 
@@ -18,12 +30,28 @@ REGION_CODES = {
     "South Africa": "ZA",
 }
 
-# Quota caps — keep these modest so a run doesn't burn the daily quota.
+# --- Year sweep ------------------------------------------------------------
+# Comments can't be filtered by year, but a video's comments cluster around when
+# it was posted. So we sweep travel videos published in EACH year and collect
+# their comments, spreading comment dates across the whole timeline.
+YEAR_START = 2015
+YEAR_END = 2026
+
+# --- Quota / volume caps ---------------------------------------------------
 # search.list costs 100 units/call; commentThreads.list costs 1 unit/call;
-# the default daily quota is ~10,000 units.
-MAX_VIDEOS_PER_QUERY = 12      # videos returned per search query
-MAX_COMMENTS_PER_VIDEO = 200   # top-level comments per video (paged, 100/page)
-MAX_RESULTS_DEFAULT = 1500     # overall cap on comments pulled per run
+# the default daily quota is ~10,000 units. Bound the number of SEARCH calls:
+#   search calls = SEARCH_QUERIES_PER_YEAR * (YEAR_END - YEAR_START + 1)
+# Default: 3 * 12 = 36 calls = 3,600 units, leaving plenty of headroom.
+SEARCH_QUERIES_PER_YEAR = 3     # how many queries to search per year (rotated)
+VIDEOS_PER_QUERY_PER_YEAR = 5   # videos taken per (query, year)
+
+# Comments per video, pulled in BOTH orders (relevance + chronological "time"),
+# so a single popular video can't dominate and we capture a wider date spread.
+COMMENTS_PER_VIDEO_PER_ORDER = 40
+
+# Overall safety cap on comments per run. None = no cap (rely on the per-year /
+# per-video limits), which keeps the date spread even across all years.
+MAX_RESULTS_DEFAULT = None
 
 
 def queries_for(country: str):
@@ -33,3 +61,7 @@ def queries_for(country: str):
             f"Add an entry to providers/youtube/config.py QUERIES."
         )
     return QUERIES[country]
+
+
+def years():
+    return list(range(YEAR_START, YEAR_END + 1))

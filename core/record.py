@@ -26,6 +26,7 @@ FIELDS = (
     "engagement",
     "sentiment_label",
     "sentiment_score",
+    "relevance_kept",
 )
 
 
@@ -41,6 +42,7 @@ class Record:
     engagement: int = 0                 # likes/score/upvotes
     sentiment_label: Optional[str] = None   # filled in later by core.sentiment
     sentiment_score: Optional[float] = None
+    relevance_kept: Optional[bool] = None   # filled in later by core.relevance
 
     def to_dict(self) -> dict:
         return asdict(self)

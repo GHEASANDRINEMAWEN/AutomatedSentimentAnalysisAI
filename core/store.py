@@ -26,6 +26,7 @@ CSV_COLUMNS = (
     "text",
     "sentiment_label",
     "sentiment_score",
+    "relevance_kept",
     "engagement",
     "url",
 )

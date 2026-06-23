@@ -24,26 +24,43 @@ providers/
 core/
   record.py         # the shared common record + timestamp normalization
   sentiment.py      # score(records) with VADER — source-agnostic
-  store.py          # append(records) to /data, dedupe on source_id
-run.py              # orchestrates: pick provider + country -> fetch -> score -> store
+  relevance.py      # mark(records): is each comment about travel/tourism?
+  store.py          # append(records) to /data + CSV export, dedupe on source_id
+run.py              # orchestrates: fetch -> mark relevance -> score -> store -> report
 config.py           # reads Reddit API credentials from environment variables
-data/               # raw pulls as JSON Lines (git-ignored, keeps .gitkeep)
+data/               # raw pulls as JSONL + CSV (git-ignored, keeps .gitkeep)
 ```
 
 ### Common record
 Every provider maps into the same flat schema:
 
 `source, source_id, country, text, author, timestamp, url, engagement,
-sentiment_label, sentiment_score`
+sentiment_label, sentiment_score, relevance_kept`
 
 Two fields are mandatory for traceability: **`timestamp`** (the item's publish
 date, ISO 8601 UTC) and **`url`** (a direct link to the comment/post). These let
 the dashboard trace every row back to its source and filter/group by date
-(e.g. 2015 to now). Dates are captured per item — we never loop over years.
+(e.g. 2015 to now). Dates are captured per item — we never loop over comment years.
+
+### Date coverage (2015–2026)
+Comments can't be filtered by year, but a video's comments cluster around when it
+was posted. So the YouTube adapter sweeps travel videos published in **each year**
+(via the API's `publishedAfter`/`publishedBefore` filters) and pulls each video's
+comments in both `relevance` and `time` order. The result is a comment-date spread
+across the whole 2015–2026 range rather than bunched in recent years. The year
+span lives in `providers/youtube/config.py`.
+
+### Relevance filter
+`core/relevance.py` marks each record with **`relevance_kept`** (True/False)
+based on whether the text looks like tourism/destination talk (keywords such as
+*visit, travel, safari, safe, beautiful, holiday* and place names like *Cape Town,
+Kruger, Garden Route*) versus creator-directed chatter, one-word reactions, or
+pure emoji. Nothing is deleted — filtered-out rows stay in the store/CSV so the
+filter can be reviewed.
 
 ### Adapter rules
 - An adapter pulls from its platform and maps into the common record. That's it
-  — **no scoring, no filtering**.
+  — **no scoring, no filtering** (relevance and scoring happen in `core/`).
 - Every record must populate `timestamp` and `url`.
 - `country` is a parameter; queries/subreddits are defined per country in each
   provider's `config.py`, so adding a country is just adding an entry.
