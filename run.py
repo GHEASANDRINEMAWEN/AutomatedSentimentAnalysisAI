@@ -1,13 +1,20 @@
-"""Orchestrate a sentiment pull: pick a provider + country -> fetch -> score -> store.
+"""Orchestrate a pull: pick a provider + country -> fetch -> analyze -> store.
 
 Usage:
     python run.py                                              # youtube, South Africa
     python run.py --provider youtube --country "South Africa"
     python run.py --provider youtube --country "South Africa" --max-results 200
+    python run.py --reprocess                                  # re-analyze stored data
 
-Adapters only pull + map; scoring and storage are source-agnostic and live in
-core/. Add a provider by dropping a new package under providers/ with a
-fetch(country, queries, max_results) function and registering it below.
+The analysis layer (all source-agnostic, in core/):
+    relevance.mark  -> is each record about travel/tourism?      (relevance_kept)
+    sentiment.score -> transformer sentiment                     (sentiment_label/score)
+    aspects.tag     -> travel topics mentioned                   (aspects)
+    emotion.tag     -> a single emotion cue                      (emotion)
+
+Adapters only pull + map; analysis and storage live in core/. Add a provider by
+dropping a new package under providers/ with a fetch(country, queries,
+max_results) function and registering it below.
 """
 
 import argparse
@@ -21,7 +28,7 @@ try:
 except (AttributeError, ValueError):
     pass
 
-from core import relevance, sentiment, store
+from core import aspects, emotion, relevance, sentiment, store
 
 PROVIDERS = {
     "youtube": "providers.youtube.adapter",
@@ -68,8 +75,11 @@ def print_summary(provider: str, country: str, records, added: int):
     print(f"Records pulled         : {len(records)}")
     print(f"Passed relevance filter: {len(keep)}   "
           f"(filtered out: {len(records) - len(keep)})")
-    print(f"New stored             : {added}   "
-          f"(duplicates skipped: {len(records) - added})")
+    if added is None:
+        print(f"Re-processed in place   : {len(records)} records")
+    else:
+        print(f"New stored             : {added}   "
+              f"(duplicates skipped: {len(records) - added})")
     lo, hi = date_range(records)
     print(f"Full date range        : {lo}  ->  {hi}")
 
@@ -81,16 +91,61 @@ def print_summary(provider: str, country: str, records, added: int):
         print(f"  {year}: {total[year]:5d} / {kept_by_year[year]:5d} kept  {bar}")
 
     print("-" * 72)
-    print("10 sample KEPT rows (sentiment / text / url):")
+    print("10 sample KEPT rows (sentiment / aspects / emotion / text / url):")
     for rec in keep[:10]:
         text = " ".join((rec.get("text") or "").split())
-        if len(text) > 90:
-            text = text[:87] + "..."
+        if len(text) > 80:
+            text = text[:77] + "..."
         label = rec.get("sentiment_label") or "n/a"
         value = rec.get("sentiment_score")
         value_str = f"{value:+.3f}" if isinstance(value, (int, float)) else "  n/a "
-        print(f"\n  - [{label:>8} {value_str}] {text}")
+        asp = rec.get("aspects") or "-"
+        emo = rec.get("emotion") or "-"
+        print(f"\n  - [{label:>8} {value_str}] aspects=[{asp}] emotion={emo}")
+        print(f"    {text}")
         print(f"    {rec.get('url')}")
+    print("=" * 72)
+
+
+def print_aspect_report(records):
+    """Aspect distribution + per-aspect sentiment breakdown over KEPT records."""
+    from collections import defaultdict
+
+    keep = relevance.kept(records)
+    counts = defaultdict(int)
+    by_sentiment = defaultdict(lambda: defaultdict(int))
+    none_count = 0
+    for rec in keep:
+        tags = [a for a in (rec.get("aspects") or "").split(",") if a]
+        if not tags:
+            none_count += 1
+            continue
+        label = rec.get("sentiment_label") or "neutral"
+        for aspect in tags:
+            counts[aspect] += 1
+            by_sentiment[aspect][label] += 1
+
+    print()
+    print("=" * 72)
+    print(f"Aspect analysis over {len(keep)} relevant records")
+    print("-" * 72)
+    print("Aspect distribution (records mentioning each aspect):")
+    order = sorted(counts, key=counts.get, reverse=True)
+    for aspect in order:
+        bar = "#" * min(counts[aspect] // 5, 50)
+        print(f"  {aspect:<12} {counts[aspect]:5d}  {bar}")
+    print(f"  {'(none)':<12} {none_count:5d}")
+
+    print("-" * 72)
+    print("Sentiment breakdown per aspect (% positive / neutral / negative):")
+    print(f"  {'aspect':<12} {'n':>5}   {'pos':>5} {'neu':>5} {'neg':>5}")
+    for aspect in order:
+        total = counts[aspect]
+        pos = by_sentiment[aspect].get("positive", 0)
+        neu = by_sentiment[aspect].get("neutral", 0)
+        neg = by_sentiment[aspect].get("negative", 0)
+        pct = lambda x: f"{(100 * x / total):4.0f}%" if total else "   0%"
+        print(f"  {aspect:<12} {total:>5}   {pct(pos)} {pct(neu)} {pct(neg)}")
     print("=" * 72)
 
 
@@ -166,9 +221,19 @@ def print_table(records, limit: int = 20):
         print(row)
 
 
+def analyze(records):
+    """Run the full source-agnostic analysis layer over records (in place)."""
+    relevance.mark(records)   # mark, don't drop — filtered rows stay for review
+    print("  scoring sentiment with transformer (first run downloads the model) ...")
+    sentiment.score(records)
+    aspects.tag(records)
+    emotion.tag(records)
+    return records
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Tourism sentiment pull (provider + country)."
+        description="Tourism sentiment + aspect/emotion analysis (provider + country)."
     )
     parser.add_argument("--provider", default="youtube", choices=list(PROVIDERS))
     parser.add_argument("--country", default="South Africa")
@@ -176,19 +241,32 @@ def main():
         "--max-results", type=int, default=None,
         help="Overall cap on items pulled (defaults to the provider's config).",
     )
+    parser.add_argument(
+        "--reprocess", action="store_true",
+        help="Skip fetching; re-analyze every record already in the store.",
+    )
     args = parser.parse_args()
 
-    provider = load_provider(args.provider)
-    print(f"Fetching {args.provider} for {args.country!r} ...")
-    records = provider.fetch(args.country, max_results=args.max_results)
-    print(f"Fetched {len(records)} records. Marking relevance + scoring with VADER ...")
-    relevance.mark(records)   # mark, don't drop — filtered rows stay for review
-    sentiment.score(records)
-    added = store.append(records)
+    if args.reprocess:
+        records = store.read_all()
+        print(f"Re-processing {len(records)} stored records ...")
+        analyze(records)
+        store.rewrite(records)          # persist new analysis columns
+        added = None
+    else:
+        provider = load_provider(args.provider)
+        print(f"Fetching {args.provider} for {args.country!r} ...")
+        records = provider.fetch(args.country, max_results=args.max_results)
+        print(f"Fetched {len(records)} records. Analyzing ...")
+        analyze(records)
+        added = store.append(records)
+
     rows = store.export_csv()  # regenerate the CSV mirror from the full store
-    print_summary(args.provider, args.country, records, added)
+    print_summary(args.provider if not args.reprocess else "reprocess",
+                  args.country, records, added)
     if any(r.get("source") == "youtube_transcript" for r in records):
         print_transcript_summary(records, sample=5)
+    print_aspect_report(records)
     print(f"\nCSV updated: {store.CSV_FILE}  ({rows} rows total)")
     # Aligned view of the KEPT (relevant) rows for quick eyeballing.
     print_table(relevance.kept(records), limit=20)

@@ -1,4 +1,5 @@
 praw
 requests
-vaderSentiment
 youtube-transcript-api
+transformers
+torch

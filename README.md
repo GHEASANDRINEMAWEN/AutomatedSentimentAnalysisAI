@@ -23,10 +23,13 @@ providers/
     config.py       # subreddits per country
 core/
   record.py         # the shared common record + timestamp normalization
-  sentiment.py      # score(records) with VADER — source-agnostic
   relevance.py      # mark(records): is each comment about travel/tourism?
-  store.py          # append(records) to /data + CSV export, dedupe on source_id
-run.py              # orchestrates: fetch -> mark relevance -> score -> store -> report
+  sentiment.py      # score(records): transformer sentiment (roberta) — source-agnostic
+  aspects.py        # tag(records): travel topics mentioned (rule-based, swappable)
+  emotion.py        # tag(records): a single emotion cue (rule-based, swappable)
+  store.py          # append/rewrite(records) to /data + CSV export, dedupe on source_id
+run.py              # fetch -> relevance -> sentiment -> aspects -> emotion -> store -> report
+                    #   (also: run.py --reprocess re-analyzes the stored data in place)
 config.py           # reads Reddit API credentials from environment variables
 data/               # raw pulls as JSONL + CSV (git-ignored, keeps .gitkeep)
 ```
@@ -35,7 +38,7 @@ data/               # raw pulls as JSONL + CSV (git-ignored, keeps .gitkeep)
 Every provider maps into the same flat schema:
 
 `source, source_id, country, text, author, timestamp, url, engagement,
-sentiment_label, sentiment_score, relevance_kept`
+sentiment_label, sentiment_score, aspects, emotion, relevance_kept`
 
 Two fields are mandatory for traceability: **`timestamp`** (the item's publish
 date, ISO 8601 UTC) and **`url`** (a direct link to the comment/post). These let
@@ -60,6 +63,24 @@ and distinguishable by `source`:
   video's publish date, `url` the video link, and `author` the channel name.
   Videos without captions are skipped. Transcript chunks go through the same
   relevance filter and sentiment scorer as comments.
+
+### Analysis layer
+Every record is enriched by source-agnostic analyzers in `core/`:
+- **Sentiment** (`sentiment.py`) — the transformer model
+  `cardiffnlp/twitter-roberta-base-sentiment-latest` sets `sentiment_label`
+  (positive/neutral/negative) and a signed `sentiment_score` in [-1, 1]
+  (`P(pos) - P(neg)`). The model downloads from the Hugging Face Hub on first
+  use and caches locally — no API key. The `score(records)` interface is
+  unchanged from the earlier VADER version.
+- **Aspects** (`aspects.py`) — rule-based keyword tagging into travel topics
+  (`safety, cost, scenery, food, wildlife, hospitality, transport`), stored as a
+  comma-separated `aspects` column (blank if none).
+- **Emotion** (`emotion.py`) — a single lightweight `emotion` label
+  (`excited / disappointed / fearful / longing / neutral`) from keyword cues.
+
+The aspect and emotion taggers are **swappable by design**: each exposes
+`tag(records)` that fills its column, so an LLM-based tagger can replace the
+rule-based one later without changing the CSV columns or any caller.
 
 ### Relevance filter
 `core/relevance.py` marks each record with **`relevance_kept`** (True/False)

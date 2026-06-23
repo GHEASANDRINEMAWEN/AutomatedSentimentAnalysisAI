@@ -26,6 +26,8 @@ CSV_COLUMNS = (
     "text",
     "sentiment_label",
     "sentiment_score",
+    "aspects",
+    "emotion",
     "relevance_kept",
     "engagement",
     "url",
@@ -69,6 +71,16 @@ def append(records) -> int:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             added += 1
     return added
+
+
+def rewrite(records) -> int:
+    """Overwrite the JSONL store with exactly `records` (used when re-processing
+    the whole dataset in place). Returns the number written."""
+    DATA_DIR.mkdir(exist_ok=True)
+    with STORE_FILE.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return len(records)
 
 
 def read_all() -> list:
