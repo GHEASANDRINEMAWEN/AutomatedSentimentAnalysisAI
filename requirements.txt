@@ -3,3 +3,6 @@ requests
 youtube-transcript-api
 transformers
 torch
+streamlit
+plotly
+pandas
