@@ -82,22 +82,32 @@ def _search_videos(query: str, region_code, max_videos: int):
 def _video_comments(video_id: str, max_comments: int):
     """Return raw commentThreads items for a video, or [] if unavailable.
 
-    Comments may be disabled or the video removed; in that case we skip the
-    video rather than aborting the whole run.
+    Pages through commentThreads (100 per page) until `max_comments` is reached
+    or there are no more pages. Comments may be disabled or the video removed;
+    in that case we skip the video rather than aborting the whole run.
     """
-    params = {
-        "part": "snippet",
-        "videoId": video_id,
-        "maxResults": min(max_comments, 100),
-        "order": "relevance",
-        "textFormat": "plainText",
-    }
-    try:
-        data = _get(COMMENTS_URL, params)
-    except YouTubeError as exc:
-        print(f"  ! skipping video {video_id}: {exc}")
-        return []
-    return data.get("items", [])
+    items = []
+    page_token = None
+    while len(items) < max_comments:
+        params = {
+            "part": "snippet",
+            "videoId": video_id,
+            "maxResults": min(max_comments - len(items), 100),
+            "order": "relevance",
+            "textFormat": "plainText",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            data = _get(COMMENTS_URL, params)
+        except YouTubeError as exc:
+            print(f"  ! skipping video {video_id}: {exc}")
+            break
+        items.extend(data.get("items", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return items
 
 
 def fetch(country: str, queries=None, max_results=None):

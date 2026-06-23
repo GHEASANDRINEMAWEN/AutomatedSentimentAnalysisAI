@@ -21,9 +21,9 @@ REGION_CODES = {
 # Quota caps — keep these modest so a run doesn't burn the daily quota.
 # search.list costs 100 units/call; commentThreads.list costs 1 unit/call;
 # the default daily quota is ~10,000 units.
-MAX_VIDEOS_PER_QUERY = 5       # videos returned per search query
-MAX_COMMENTS_PER_VIDEO = 50    # top-level comments per video (<= 100 per page)
-MAX_RESULTS_DEFAULT = 300      # overall cap on comments pulled per run
+MAX_VIDEOS_PER_QUERY = 12      # videos returned per search query
+MAX_COMMENTS_PER_VIDEO = 200   # top-level comments per video (paged, 100/page)
+MAX_RESULTS_DEFAULT = 1500     # overall cap on comments pulled per run
 
 
 def queries_for(country: str):
