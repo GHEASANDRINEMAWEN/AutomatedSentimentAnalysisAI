@@ -65,7 +65,7 @@ def print_summary(provider: str, country: str, records, added: int):
     print()
     print("=" * 72)
     print(f"Provider: {provider}    Country: {country}")
-    print(f"Comments pulled        : {len(records)}")
+    print(f"Records pulled         : {len(records)}")
     print(f"Passed relevance filter: {len(keep)}   "
           f"(filtered out: {len(records) - len(keep)})")
     print(f"New stored             : {added}   "
@@ -94,6 +94,40 @@ def print_summary(provider: str, country: str, records, added: int):
     print("=" * 72)
 
 
+def _video_id_from_url(url: str) -> str:
+    """Extract the YouTube video id from a watch URL (…watch?v=ID[&…])."""
+    if "v=" not in url:
+        return url
+    return url.split("v=", 1)[1].split("&", 1)[0]
+
+
+def print_transcript_summary(records, sample: int = 5):
+    """Report the transcript signal: videos covered, chunks, and samples."""
+    transcripts = [r for r in records if r.get("source") == "youtube_transcript"]
+    videos = {_video_id_from_url(r.get("url") or "") for r in transcripts}
+    comments = sum(1 for r in records if r.get("source") == "youtube")
+
+    print()
+    print("=" * 72)
+    print("Transcript signal")
+    print(f"  Comment records      : {comments}")
+    print(f"  Videos w/ transcript : {len(videos)}")
+    print(f"  Transcript chunks    : {len(transcripts)}")
+    print("-" * 72)
+    print(f"{min(sample, len(transcripts))} sample transcript chunks (sentiment / text / url):")
+    for rec in transcripts[:sample]:
+        text = " ".join((rec.get("text") or "").split())
+        if len(text) > 90:
+            text = text[:87] + "..."
+        label = rec.get("sentiment_label") or "n/a"
+        value = rec.get("sentiment_score")
+        value_str = f"{value:+.3f}" if isinstance(value, (int, float)) else "  n/a "
+        kept = "kept" if rec.get("relevance_kept") else "filtered"
+        print(f"\n  - [{label:>8} {value_str}] ({kept}) {text}")
+        print(f"    {rec.get('url')}")
+    print("=" * 72)
+
+
 def _clip(value, width: int) -> str:
     """Truncate a value to `width` chars with an ellipsis if needed."""
     text = " ".join(str(value or "").split())
@@ -110,7 +144,7 @@ def print_table(records, limit: int = 20):
     columns = [
         ("#",     3,  lambda r, i: str(i + 1)),
         ("date",  10, lambda r, i: (r.get("timestamp") or "")[:10]),
-        ("source", 8, lambda r, i: r.get("source") or ""),
+        ("source", 18, lambda r, i: r.get("source") or ""),
         ("country", 12, lambda r, i: r.get("country") or ""),
         ("sentiment", 9, lambda r, i: r.get("sentiment_label") or ""),
         ("score", 7, lambda r, i: (
@@ -153,6 +187,8 @@ def main():
     added = store.append(records)
     rows = store.export_csv()  # regenerate the CSV mirror from the full store
     print_summary(args.provider, args.country, records, added)
+    if any(r.get("source") == "youtube_transcript" for r in records):
+        print_transcript_summary(records, sample=5)
     print(f"\nCSV updated: {store.CSV_FILE}  ({rows} rows total)")
     # Aligned view of the KEPT (relevant) rows for quick eyeballing.
     print_table(relevance.kept(records), limit=20)

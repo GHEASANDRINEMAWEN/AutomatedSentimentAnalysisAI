@@ -16,8 +16,8 @@ source-agnostic and shared.
 ```
 providers/
   youtube/
-    adapter.py      # fetch(country, queries, max_results) -> common records
-    config.py       # per-country search queries + quota caps
+    adapter.py      # comments + transcripts -> common records
+    config.py       # per-country search queries, year span, quota/transcript caps
   reddit/
     adapter.py      # Reddit fetch (moved from collect_reddit.py)
     config.py       # subreddits per country
@@ -49,6 +49,17 @@ was posted. So the YouTube adapter sweeps travel videos published in **each year
 comments in both `relevance` and `time` order. The result is a comment-date spread
 across the whole 2015–2026 range rather than bunched in recent years. The year
 span lives in `providers/youtube/config.py`.
+
+### Two YouTube signals
+The YouTube provider produces two kinds of records, both in the common schema
+and distinguishable by `source`:
+- **`youtube`** — top-level video comments (via the Data API).
+- **`youtube_transcript`** — each collected video's transcript (via
+  [youtube-transcript-api](https://pypi.org/project/youtube-transcript-api/),
+  no API key), split into ~sentence-sized chunks. The chunk's `timestamp` is the
+  video's publish date, `url` the video link, and `author` the channel name.
+  Videos without captions are skipped. Transcript chunks go through the same
+  relevance filter and sentiment scorer as comments.
 
 ### Relevance filter
 `core/relevance.py` marks each record with **`relevance_kept`** (True/False)

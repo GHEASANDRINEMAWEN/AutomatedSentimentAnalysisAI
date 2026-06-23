@@ -49,6 +49,14 @@ VIDEOS_PER_QUERY_PER_YEAR = 5   # videos taken per (query, year)
 # so a single popular video can't dominate and we capture a wider date spread.
 COMMENTS_PER_VIDEO_PER_ORDER = 40
 
+# --- Transcripts -----------------------------------------------------------
+# Transcripts (via youtube-transcript-api, no API key) are an extra signal
+# alongside comments. Each video's transcript is split into ~chunk-sized pieces.
+INCLUDE_TRANSCRIPTS = True
+TRANSCRIPT_CHUNK_CHARS = 280        # target size of each transcript chunk
+TRANSCRIPT_LANGUAGES = ("en", "en-US", "en-GB")
+MAX_TRANSCRIPT_CHUNKS_PER_VIDEO = 40  # cap so one long video can't dominate
+
 # Overall safety cap on comments per run. None = no cap (rely on the per-year /
 # per-video limits), which keeps the date spread even across all years.
 MAX_RESULTS_DEFAULT = None
