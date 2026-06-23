@@ -7,3 +7,5 @@ __pycache__/
 # Raw pulls (keep the folder, ignore its contents)
 /data/*
 !/data/.gitkeep
+# ...but do commit a small sample so the data is viewable on GitHub
+!/data/sample_records.csv
