@@ -24,10 +24,15 @@ KEYWORDS = (
 
 # Destination/place names — a strong signal the comment is about the place.
 PLACES = (
+    # South Africa
     "south africa", "cape town", "johannesburg", "joburg", "jozi", "durban",
     "kruger", "garden route", "pretoria", "soweto", "table mountain",
     "kzn", "stellenbosch", "drakensberg", "knysna", "port elizabeth",
     "western cape", "sun city", "robben island",
+    # Rwanda
+    "rwanda", "kigali", "volcanoes national park", "nyungwe", "lake kivu",
+    "akagera", "musanze", "ruhengeri", "gisenyi", "rubavu", "virunga",
+    "gorilla trekking", "bisoke", "karisimbi", "huye", "land of a thousand hills",
 )
 
 # Phrases that mark a comment as directed at the creator / low-signal chatter.

@@ -33,6 +33,8 @@ ASPECTS = {
     "wildlife": [
         "safari", "animal", "animals", "kruger", "big five", "big 5", "wildlife",
         "elephant", "elephants", "lion", "lions", "game drive", "rhino", "leopard",
+        "gorilla", "gorillas", "gorilla trekking", "chimpanzee", "chimpanzees",
+        "chimp", "golden monkey", "primate", "primates",
     ],
     "hospitality": [
         "friendly", "welcoming", "people", "rude", "hospitable", "hospitality",

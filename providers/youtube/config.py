@@ -23,11 +23,27 @@ QUERIES = {
         "Durban travel",
         "South Africa tourist tips",
     ],
+    "Rwanda": [
+        "Rwanda travel guide",
+        "things to do in Rwanda",
+        "is Rwanda safe for tourists",
+        "Rwanda travel vlog",
+        "visiting Kigali",
+        "gorilla trekking Rwanda",
+        "Rwanda itinerary",
+        "Volcanoes National Park Rwanda",
+        "Kigali vlog",
+        "Rwanda holiday",
+        "best places to visit Rwanda",
+        "Lake Kivu travel",
+        "Rwanda tourist tips",
+    ],
 }
 
 # Optional ISO 3166-1 alpha-2 region bias per country (improves relevance).
 REGION_CODES = {
     "South Africa": "ZA",
+    "Rwanda": "RW",
 }
 
 # --- Year sweep ------------------------------------------------------------

@@ -10,6 +10,7 @@ DEFAULT_SUBREDDITS = ["travel", "solotravel", "TravelNoFilter", "all"]
 # Per-country overrides (optional).
 SUBREDDITS = {
     "South Africa": ["travel", "solotravel", "southafrica", "all"],
+    "Rwanda": ["travel", "solotravel", "Rwanda", "africa", "all"],
 }
 
 MAX_RESULTS_DEFAULT = 100  # max posts per subreddit
