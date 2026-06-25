@@ -1,8 +1,5 @@
-praw
-requests
-youtube-transcript-api
-transformers
-torch
+# Dashboard runtime (Streamlit Community Cloud reads this file).
+# For the full data-collection pipeline (run.py) use requirements-pipeline.txt.
 streamlit
 plotly
 pandas

@@ -1,0 +1,8 @@
+# Full data-collection + analysis pipeline (run.py).
+# The dashboard alone only needs requirements.txt.
+praw
+requests
+youtube-transcript-api
+transformers
+torch
+pandas

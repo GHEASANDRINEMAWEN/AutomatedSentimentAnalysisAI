@@ -99,8 +99,20 @@ filter can be reviewed.
 
 ## Setup
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-pipeline.txt   # full data-collection + analysis pipeline (run.py)
+pip install -r requirements.txt            # dashboard only (streamlit/plotly/pandas)
 ```
+`requirements.txt` is intentionally the lightweight dashboard set so it deploys
+cleanly to Streamlit Community Cloud (which auto-installs `requirements.txt`).
+The heavy model/collection deps (torch, transformers, praw, …) live in
+`requirements-pipeline.txt`.
+
+### Dashboard
+```bash
+python -m streamlit run dashboard.py
+```
+Reads `data/records.csv` and serves the filterable perception dashboard. It is
+deployable as-is on Streamlit Community Cloud — point it at `dashboard.py`.
 
 ### YouTube
 Set your YouTube Data API v3 key as an environment variable (never commit it):
