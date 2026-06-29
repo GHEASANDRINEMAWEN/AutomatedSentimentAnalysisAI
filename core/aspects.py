@@ -25,6 +25,7 @@ ASPECTS = {
     "scenery": [
         "beautiful", "view", "views", "mountain", "mountains", "beach", "beaches",
         "scenery", "scenic", "landscape", "stunning", "gorgeous", "sunset", "nature",
+        "kilimanjaro", "island", "islands", "waterfall", "waterfalls", "crater",
     ],
     "food": [
         "food", "eat", "eating", "restaurant", "restaurants", "biltong", "wine",
@@ -35,6 +36,8 @@ ASPECTS = {
         "elephant", "elephants", "lion", "lions", "game drive", "rhino", "leopard",
         "gorilla", "gorillas", "gorilla trekking", "chimpanzee", "chimpanzees",
         "chimp", "golden monkey", "primate", "primates",
+        "wildebeest", "great migration", "serengeti", "maasai mara", "masai mara",
+        "ngorongoro", "amboseli", "tsavo", "zebra", "zebras", "giraffe", "giraffes",
     ],
     "hospitality": [
         "friendly", "welcoming", "people", "rude", "hospitable", "hospitality",

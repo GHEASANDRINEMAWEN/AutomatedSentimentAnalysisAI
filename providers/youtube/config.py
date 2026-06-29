@@ -38,12 +38,44 @@ QUERIES = {
         "Lake Kivu travel",
         "Rwanda tourist tips",
     ],
+    "Kenya": [
+        "Kenya travel guide",
+        "things to do in Kenya",
+        "is Kenya safe for tourists",
+        "Kenya travel vlog",
+        "visiting Nairobi",
+        "Maasai Mara safari",
+        "Kenya itinerary",
+        "Diani Beach Kenya",
+        "Nairobi vlog",
+        "Kenya holiday",
+        "best places to visit Kenya",
+        "Mombasa travel",
+        "Kenya tourist tips",
+    ],
+    "Tanzania": [
+        "Tanzania travel guide",
+        "things to do in Tanzania",
+        "is Tanzania safe for tourists",
+        "Tanzania travel vlog",
+        "visiting Zanzibar",
+        "Serengeti safari",
+        "Tanzania itinerary",
+        "climbing Kilimanjaro",
+        "Zanzibar vlog",
+        "Tanzania holiday",
+        "best places to visit Tanzania",
+        "Arusha travel",
+        "Tanzania tourist tips",
+    ],
 }
 
 # Optional ISO 3166-1 alpha-2 region bias per country (improves relevance).
 REGION_CODES = {
     "South Africa": "ZA",
     "Rwanda": "RW",
+    "Kenya": "KE",
+    "Tanzania": "TZ",
 }
 
 # --- Year sweep ------------------------------------------------------------

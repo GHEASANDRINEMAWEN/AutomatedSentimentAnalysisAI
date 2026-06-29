@@ -36,6 +36,12 @@ CARD = "#FFFFFF"
 SENTIMENTS = ["positive", "neutral", "negative"]
 SENTIMENT_COLORS = {"positive": GREEN, "neutral": GREY, "negative": RED}
 
+# Qualitative palette for per-country series in the regional-comparison view.
+COUNTRY_PALETTE = [
+    "#127B82", "#7C6FD6", "#E8A33D", "#2E9E5B",
+    "#D1495B", "#3D7DCA", "#C45BAA", "#1C8C8C",
+]
+
 ALL_ASPECTS = [
     "food", "scenery", "safety", "wildlife", "hospitality", "transport", "cost",
 ]
@@ -150,6 +156,46 @@ def time_series(df, granularity: str) -> pd.DataFrame:
     grouped["perception"] = (grouped["avg_sentiment"] + 1) / 2 * 100
     grouped["period"] = grouped["period"].astype(str)
     return grouped.sort_values("period")
+
+
+# --------------------------------------------------------------------------- #
+# Regional comparison (across countries)
+# --------------------------------------------------------------------------- #
+def country_color_map(countries) -> dict:
+    return {c: COUNTRY_PALETTE[i % len(COUNTRY_PALETTE)]
+            for i, c in enumerate(sorted(countries))}
+
+
+def compare_metrics(df_all) -> pd.DataFrame:
+    """One row per country with headline metrics, ranked by perception."""
+    rows = []
+    for country, g in df_all.groupby("country"):
+        m = summarize(g)
+        net = aspect_net(g)
+        loved = net.loc[net["net"].idxmax(), "aspect"] if not net.empty else "—"
+        crit = net.loc[net["net"].idxmin(), "aspect"] if not net.empty else "—"
+        rows.append(dict(
+            country=country, mentions=m["n"], perception=m["perception"],
+            net=m["net"], positive=m["pos"], neutral=m["neu"], negative=m["neg"],
+            top_loved=loved, top_critical=crit,
+        ))
+    if not rows:
+        return pd.DataFrame(columns=[
+            "country", "mentions", "perception", "net", "positive",
+            "neutral", "negative", "top_loved", "top_critical"])
+    return pd.DataFrame(rows).sort_values("perception", ascending=False)
+
+
+def compare_aspect_net(df_all) -> pd.DataFrame:
+    """Matrix (rows=country, cols=aspect) of net sentiment per aspect."""
+    series = {}
+    for country, g in df_all.groupby("country"):
+        net = aspect_net(g)
+        if not net.empty:
+            series[country] = net.set_index("aspect")["net"]
+    if not series:
+        return pd.DataFrame(columns=ALL_ASPECTS)
+    return pd.DataFrame(series).T.reindex(columns=ALL_ASPECTS)
 
 
 # --------------------------------------------------------------------------- #
@@ -595,6 +641,150 @@ def render_table(df):
 
 
 # --------------------------------------------------------------------------- #
+# Regional comparison render
+# --------------------------------------------------------------------------- #
+def render_compare_perception(metrics, cmap):
+    st.markdown('<div class="sec-title">Perception score ranking</div>'
+                '<div class="sec-cap">Higher = more positive overall sentiment '
+                '(0–100).</div>', unsafe_allow_html=True)
+    m = metrics.sort_values("perception")
+    fig = go.Figure(go.Bar(
+        y=m["country"], x=m["perception"], orientation="h",
+        marker_color=[cmap[c] for c in m["country"]], marker_cornerradius=6,
+        text=[f"{v}" for v in m["perception"]], textposition="outside",
+        textfont=dict(color=INK, size=13),
+        customdata=m["mentions"],
+        hovertemplate="%{y}<br>perception: %{x}<br>%{customdata:,} mentions<extra></extra>",
+    ))
+    style_fig(fig, height=max(220, 60 * len(m)))
+    fig.update_xaxes(range=[0, 100])
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_compare_mix(metrics):
+    st.markdown('<div class="sec-title">Sentiment mix by country</div>'
+                '<div class="sec-cap">Share of positive / neutral / negative within '
+                'each country.</div>', unsafe_allow_html=True)
+    m = metrics.sort_values("perception")
+    fig = go.Figure()
+    for s in SENTIMENTS:
+        fig.add_bar(
+            y=m["country"], x=m[s], orientation="h", name=s.capitalize(),
+            marker_color=SENTIMENT_COLORS[s], marker_cornerradius=4,
+            hovertemplate="%{y} — " + s + ": %{x:.0f}%%<extra></extra>",
+        )
+    fig.update_layout(barmode="stack")
+    style_fig(fig, height=max(220, 60 * len(m)))
+    fig.update_xaxes(range=[0, 100], ticksuffix="%")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_compare_trend(df_all, granularity, cmap):
+    st.markdown(f'<div class="sec-title">Perception over time by country</div>'
+                f'<div class="sec-cap">Perception score per {granularity.lower()}, '
+                f'one line per country.</div>', unsafe_allow_html=True)
+    fig = go.Figure()
+    plotted = False
+    for country, g in df_all.groupby("country"):
+        series = time_series(g, granularity)
+        if series.empty:
+            continue
+        plotted = True
+        fig.add_trace(go.Scatter(
+            x=series["period"], y=series["perception"], name=country, mode="lines+markers",
+            line=dict(color=cmap[country], width=3, shape="spline", smoothing=0.6),
+            marker=dict(size=6),
+            hovertemplate=country + "<br>%{x}: %{y:.0f}<extra></extra>",
+        ))
+    if not plotted:
+        st.info("No records for the current filters.")
+        return
+    style_fig(fig, height=380)
+    fig.update_yaxes(title_text="Perception", range=[0, 100])
+    fig.add_hline(y=50, line_dash="dot", line_color=BORDER)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_compare_aspect_heatmap(df_all):
+    st.markdown('<div class="sec-title">Net sentiment by aspect × country</div>'
+                '<div class="sec-cap">Green = loved, red = criticised. Blank = no '
+                'tagged mentions.</div>', unsafe_allow_html=True)
+    mat = compare_aspect_net(df_all)
+    if mat.empty:
+        st.info("No aspect-tagged records for the current filters.")
+        return
+    aspects_present = [a for a in ALL_ASPECTS if a in mat.columns and mat[a].notna().any()]
+    mat = mat[aspects_present]
+    text = [[("" if pd.isna(v) else f"{v:+.0f}") for v in row] for row in mat.values]
+    fig = go.Figure(go.Heatmap(
+        z=mat.values, x=[a.capitalize() for a in mat.columns], y=mat.index.tolist(),
+        zmid=0, zmin=-100, zmax=100,
+        colorscale=[[0.0, RED], [0.5, "#F4F7F7"], [1.0, GREEN]],
+        text=text, texttemplate="%{text}", textfont=dict(size=12),
+        hovertemplate="%{y} — %{x}: %{z:+.0f}%%<extra></extra>",
+        xgap=3, ygap=3, colorbar=dict(title="net %", thickness=12),
+    ))
+    style_fig(fig, height=max(240, 70 * len(mat)))
+    fig.update_yaxes(showgrid=False)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_compare_table(metrics):
+    st.markdown('<div class="sec-title">Country scoreboard</div>'
+                '<div class="sec-cap">Every country in view, ranked by perception.</div>',
+                unsafe_allow_html=True)
+    show = metrics.assign(
+        rank=range(1, len(metrics) + 1),
+    )[["rank", "country", "perception", "net", "positive", "negative",
+       "mentions", "top_loved", "top_critical"]]
+    st.dataframe(
+        show, use_container_width=True, hide_index=True,
+        column_config={
+            "rank": st.column_config.NumberColumn("#", width="small"),
+            "perception": st.column_config.ProgressColumn(
+                "perception", min_value=0, max_value=100, format="%d"),
+            "net": st.column_config.NumberColumn("net %", format="%+.0f"),
+            "positive": st.column_config.NumberColumn("pos %", format="%.0f"),
+            "negative": st.column_config.NumberColumn("neg %", format="%.0f"),
+            "mentions": st.column_config.NumberColumn("mentions", format="%,d"),
+            "top_loved": st.column_config.TextColumn("most loved"),
+            "top_critical": st.column_config.TextColumn("most criticised"),
+        },
+    )
+
+
+def render_compare(df_all, granularity):
+    countries = sorted(df_all["country"].dropna().unique().tolist())
+    if not countries:
+        st.info("No records for the current filters.")
+        return
+    picked = st.multiselect(
+        "Countries to compare", countries, default=countries,
+        help="Independent of the sidebar Country picker — choose any subset to compare.",
+    )
+    if not picked:
+        st.info("Pick at least one country to compare.")
+        return
+    sub = df_all[df_all["country"].isin(picked)]
+    cmap = country_color_map(countries)
+    metrics = compare_metrics(sub)
+
+    c1, c2 = st.columns(2, gap="medium")
+    with c1:
+        with st.container(border=True):
+            render_compare_perception(metrics, cmap)
+    with c2:
+        with st.container(border=True):
+            render_compare_mix(metrics)
+    with st.container(border=True):
+        render_compare_trend(sub, granularity, cmap)
+    with st.container(border=True):
+        render_compare_aspect_heatmap(sub)
+    with st.container(border=True):
+        render_compare_table(metrics)
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def main():
@@ -632,6 +822,12 @@ def main():
                   sources=sources, kept_only=kept_only)
     filtered = filter_data(df, year_range=year_range, **common)
 
+    # Same filters but across ALL countries — drives the regional comparison tab.
+    filtered_all = filter_data(
+        df, country="All", year_range=year_range, aspects=aspects,
+        sentiments=sentiments, sources=sources, kept_only=kept_only,
+    )
+
     # Previous, equally-sized window immediately before the selected range.
     lo, hi = year_range
     span = hi - lo + 1
@@ -640,13 +836,16 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Showing **{len(filtered):,}** of {len(df):,} records")
+    st.sidebar.caption("The **Compare** tab spans all countries; the other tabs "
+                       "follow the Country picker above.")
 
     # ----- Header + metric cards (always visible) -----
     render_header(filtered, cur_m, prev_m)
     render_metric_cards(cur_m, prev_m)
     st.write("")
 
-    overview, themes, voices, data = st.tabs(["Overview", "Themes", "Voices", "Data"])
+    overview, compare, themes, voices, data = st.tabs(
+        ["Overview", "Compare", "Themes", "Voices", "Data"])
 
     with overview:
         with st.container(border=True):
@@ -660,6 +859,9 @@ def main():
         with c2:
             with st.container(border=True):
                 render_signals(filtered, cur_m, prev_m)
+
+    with compare:
+        render_compare(filtered_all, granularity)
 
     with themes:
         c1, c2 = st.columns(2, gap="medium")

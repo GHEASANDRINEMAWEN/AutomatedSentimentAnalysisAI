@@ -33,6 +33,14 @@ PLACES = (
     "rwanda", "kigali", "volcanoes national park", "nyungwe", "lake kivu",
     "akagera", "musanze", "ruhengeri", "gisenyi", "rubavu", "virunga",
     "gorilla trekking", "bisoke", "karisimbi", "huye", "land of a thousand hills",
+    # Kenya
+    "kenya", "nairobi", "mombasa", "maasai mara", "masai mara", "diani",
+    "lamu", "amboseli", "nakuru", "lake nakuru", "tsavo", "malindi",
+    "rift valley", "mount kenya", "watamu", "samburu",
+    # Tanzania
+    "tanzania", "zanzibar", "serengeti", "kilimanjaro", "ngorongoro",
+    "dar es salaam", "arusha", "stone town", "dodoma", "mafia island",
+    "tarangire", "pemba", "moshi", "selous",
 )
 
 # Phrases that mark a comment as directed at the creator / low-signal chatter.
