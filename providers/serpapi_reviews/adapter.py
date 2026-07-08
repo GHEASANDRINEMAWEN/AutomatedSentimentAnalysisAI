@@ -31,6 +31,7 @@ Field mapping (review -> common record):
 """
 
 import datetime as _dt
+import re
 
 import requests
 
@@ -145,16 +146,50 @@ _DATE_FORMATS = (
     "%d %B %Y", "%d %b %Y", "%B %Y", "%b %Y", "%m/%d/%Y",
 )
 
+# Approximate day-lengths for relative dates ("a month ago", "3 weeks ago").
+_REL_UNIT_DAYS = {
+    "second": 0, "minute": 0, "hour": 0, "day": 1,
+    "week": 7, "month": 30, "year": 365,
+}
+_REL_RE = re.compile(
+    r"\b(a|an|\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago\b")
+
+
+def _relative_to_iso(s: str):
+    """Convert a Google-style relative date ("a month ago") to ISO 8601 UTC.
+
+    Google Hotels reviews only carry relative dates, so we approximate an
+    absolute date off today's date (week=7d, month=30d, year=365d). Returns
+    None if `s` isn't a recognised relative expression.
+    """
+    low = s.lower().strip()
+    if low in ("today", "just now", "a moment ago"):
+        return _dt.datetime.now(_dt.timezone.utc).date().isoformat() + "T00:00:00+00:00"
+    if low == "yesterday":
+        d = _dt.date.today() - _dt.timedelta(days=1)
+        return d.isoformat() + "T00:00:00+00:00"
+    m = _REL_RE.search(low)
+    if not m:
+        return None
+    qty = 1 if m.group(1) in ("a", "an") else int(m.group(1))
+    days = qty * _REL_UNIT_DAYS[m.group(2)]
+    d = _dt.date.today() - _dt.timedelta(days=days)
+    return d.isoformat() + "T00:00:00+00:00"
+
 
 def _normalize_date(value) -> str:
     """Best-effort normalize a review date to ISO 8601 UTC.
 
-    Review dates arrive in many shapes ("2023-08-01", "August 2023", "Aug 2023").
+    Review dates arrive in many shapes: absolute ("2023-08-01", "August 2023")
+    and relative ("a month ago", "3 weeks ago" — Google Hotels' format).
     Anything we can't parse is passed through for to_iso8601 to handle.
     """
     if not value:
         return ""
     s = str(value).strip()
+    rel = _relative_to_iso(s)
+    if rel:
+        return rel
     for fmt in _DATE_FORMATS:
         try:
             return (_dt.datetime.strptime(s, fmt)

@@ -49,6 +49,9 @@ ALL_ASPECTS = [
 SOURCE_LABELS = {
     "youtube": "YouTube comments",
     "youtube_transcript": "YouTube transcripts",
+    "google_hotels": "Google Hotels reviews",
+    "tripadvisor": "Tripadvisor reviews",
+    "reddit": "Reddit posts",
 }
 
 YEAR_MIN, YEAR_MAX = 2015, 2026
