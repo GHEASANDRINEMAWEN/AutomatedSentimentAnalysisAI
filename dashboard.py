@@ -1195,9 +1195,27 @@ def main():
     st.sidebar.caption("The **Compare** tab spans all countries; the other tabs "
                        "follow the Country picker above.")
 
-    # ----- Header + metric cards (always visible) -----
+    # ----- Header + metric cards -----
     render_header(filtered, cur_m, prev_m)
-    render_metric_cards(cur_m, prev_m)
+    if filtered.empty:
+        # Explain the empty view instead of showing a wall of zeros. The most
+        # common dead-end: a Data source that has no rows for the chosen country
+        # (e.g. Reviews (SerpApi) currently only cover South Africa).
+        src_rows = df[df["source"].isin(sources)] if sources else df
+        countries_with_src = sorted(src_rows["country"].dropna().unique().tolist())
+        prov_label = " + ".join(providers) if providers else "the selected data sources"
+        if countries_with_src and country not in countries_with_src:
+            st.warning(
+                f"No **{prov_label}** records for **{country}**. That data currently "
+                f"exists for: **{', '.join(countries_with_src)}**. Switch the "
+                f"**Country** picker at the top of the sidebar, or add another "
+                f"**Data source**.", icon="⚠️")
+        else:
+            st.warning(
+                "No records match the current filters. Try widening the year range, "
+                "sentiment, or **Data source** in the sidebar.", icon="⚠️")
+    else:
+        render_metric_cards(cur_m, prev_m)
     st.write("")
 
     # The Reviews tab only appears when the dataset actually has review records.
