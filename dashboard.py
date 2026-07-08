@@ -44,6 +44,7 @@ COUNTRY_PALETTE = [
 
 ALL_ASPECTS = [
     "food", "scenery", "safety", "wildlife", "hospitality", "transport", "cost",
+    "weather", "electricity", "water", "housing",
 ]
 SOURCE_LABELS = {
     "youtube": "YouTube comments",
@@ -282,6 +283,15 @@ def inject_css():
             text-decoration: none; }
         .pill { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 20px;
             text-transform: uppercase; letter-spacing: .04em; }
+
+        /* Expandable long comments in the aspect explorer */
+        .voice-card details { margin: 0; }
+        .voice-card details summary {
+            cursor: pointer; color: #1C2B2E; font-size: 14px; line-height: 1.45;
+            list-style-position: outside; }
+        .voice-card details summary::-webkit-details-marker { color: #127B82; }
+        .voice-card details summary:hover { color: #127B82; }
+        .voice-card .more-link { color: #127B82; font-weight: 600; font-size: 12px; }
 
         .sec-title { color: #1C2B2E; font-size: 16px; font-weight: 700; margin: 0 0 2px 0; }
         .sec-cap   { color: #5E7174; font-size: 12.5px; margin: 0 0 12px 0; }
@@ -615,6 +625,134 @@ def render_voices(df):
                 st.markdown(_voice_cards(neg, RED), unsafe_allow_html=True)
 
 
+def _source_kind(source) -> str:
+    """Short 'comment' vs 'transcript' label for the aspect explorer cards."""
+    return "transcript" if source == "youtube_transcript" else "comment"
+
+
+# Cap the number of cards rendered per list so a busy aspect (e.g. scenery with
+# ~1,800 mentions) stays snappy; the exact count is always shown in the caption.
+EXPLORER_CAP = 200
+EXPLORER_SPLIT_CAP = 150
+
+
+def _comment_card(r) -> str:
+    """One comment card: sentiment pill, date, source, likes, score, link.
+
+    Long text collapses into a native <details> so each comment is expandable
+    without leaving the scrollable list.
+    """
+    text = str(r["text"]).replace("<", "&lt;").replace(">", "&gt;")
+    accent = SENTIMENT_COLORS.get(r["sentiment_label"], GREY)
+    if len(text) > 240:
+        body = (
+            f'<details><summary>{text[:240]}… '
+            f'<span class="more-link">show more</span></summary>'
+            f'<div class="voice-text" style="margin-top:8px">{text}</div></details>'
+        )
+    else:
+        body = f'<div class="voice-text">{text}</div>'
+    date = str(r.get("date") or "")[:10]
+    kind = _source_kind(r["source"])
+    link = (f'<a href="{r["url"]}" target="_blank">open ↗</a>'
+            if isinstance(r["url"], str) and r["url"].startswith("http") else "")
+    return (
+        f'<div class="voice-card">'
+        f'<div class="voice-meta">'
+        f'<span><span class="pill" style="background:{accent}22;color:{accent}">'
+        f'{r["sentiment_label"]}</span> &nbsp;{date} · {kind}</span>'
+        f'<span>👍 {int(r["engagement"]):,} · {r["sentiment_score"]:+.2f}</span></div>'
+        f'{body}'
+        f'<div style="margin-top:8px">{link}</div></div>'
+    )
+
+
+def _sort_comments(rows, sort_by):
+    if sort_by == "Most positive":
+        return rows.sort_values("sentiment_score", ascending=False)
+    if sort_by == "Most negative":
+        return rows.sort_values("sentiment_score", ascending=True)
+    return rows.sort_values("engagement", ascending=False)  # Most engaged
+
+
+def _comment_list(container, rows, cap):
+    """Render up to `cap` comment cards into a scrollable container."""
+    shown = rows.head(cap)
+    container.markdown(
+        "".join(_comment_card(r) for _, r in shown.iterrows()),
+        unsafe_allow_html=True,
+    )
+    if len(rows) > cap:
+        container.caption(f"Showing first {cap:,} of {len(rows):,} — narrow the "
+                          f"filters or sort to see the rest.")
+
+
+def render_aspect_explorer(df):
+    st.markdown('<div class="sec-title">Explore comments by aspect</div>'
+                '<div class="sec-cap">Pick an aspect to read the actual comments behind it. '
+                'Respects every sidebar filter (country, dates, sentiment, source, '
+                'relevant-only).</div>', unsafe_allow_html=True)
+    if df.empty:
+        st.info("No records for the current filters.")
+        return
+
+    # Only offer aspects that actually appear in the filtered data.
+    present = [
+        a for a in ALL_ASPECTS
+        if df["aspects"].str.contains(rf"(?:^|,){a}(?:,|$)", regex=True, na=False).any()
+    ]
+    if not present:
+        st.info("No aspect-tagged comments for the current filters.")
+        return
+
+    c1, c2, c3 = st.columns([2.2, 1.2, 1.0], gap="medium")
+    with c1:
+        aspect = st.radio("Aspect", present, horizontal=True,
+                          format_func=str.capitalize, key="explore_aspect")
+    with c2:
+        sort_by = st.selectbox(
+            "Sort by", ["Most engaged", "Most positive", "Most negative"],
+            key="explore_sort")
+    with c3:
+        split = st.toggle("Split + / −", value=True, key="explore_split",
+                          help="Two columns: what people love vs criticise about this aspect.")
+
+    pattern = rf"(?:^|,){aspect}(?:,|$)"
+    sub = df[df["aspects"].str.contains(pattern, regex=True, na=False)]
+
+    if split:
+        left, right = st.columns(2, gap="medium")
+        pos = _sort_comments(sub[sub["sentiment_label"] == "positive"], sort_by)
+        neg = _sort_comments(sub[sub["sentiment_label"] == "negative"], sort_by)
+        with left:
+            st.markdown(
+                f'<div class="sec-title" style="color:{GREEN}">Positive about '
+                f'{aspect.capitalize()}</div>'
+                f'<div class="sec-cap">{len(pos):,} comments</div>',
+                unsafe_allow_html=True)
+            box = st.container(height=520)
+            if pos.empty:
+                box.caption("None in view.")
+            else:
+                _comment_list(box, pos, EXPLORER_SPLIT_CAP)
+        with right:
+            st.markdown(
+                f'<div class="sec-title" style="color:{RED}">Negative about '
+                f'{aspect.capitalize()}</div>'
+                f'<div class="sec-cap">{len(neg):,} comments</div>',
+                unsafe_allow_html=True)
+            box = st.container(height=520)
+            if neg.empty:
+                box.caption("None in view.")
+            else:
+                _comment_list(box, neg, EXPLORER_SPLIT_CAP)
+    else:
+        rows = _sort_comments(sub, sort_by)
+        st.caption(f"{len(rows):,} comments tagged “{aspect}”")
+        box = st.container(height=560)
+        _comment_list(box, rows, EXPLORER_CAP)
+
+
 def render_table(df):
     st.markdown('<div class="sec-title">Browse the records</div>'
                 '<div class="sec-cap">Every mention behind the charts above.</div>',
@@ -871,6 +1009,8 @@ def main():
         with c2:
             with st.container(border=True):
                 render_aspect_net(filtered)
+        with st.container(border=True):
+            render_aspect_explorer(filtered)
 
     with voices:
         render_voices(filtered)

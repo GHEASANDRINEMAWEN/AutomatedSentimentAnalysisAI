@@ -47,6 +47,21 @@ ASPECTS = {
         "uber", "taxi", "drive", "driving", "airport", "road", "roads", "flight",
         "flights", "car", "cars", "transport", "traffic", "train", "bus",
     ],
+    "weather": [
+        "weather", "hot", "cold", "rain", "sunny", "climate", "humid", "heatwave",
+    ],
+    "electricity": [
+        "electricity", "power", "load shedding", "loadshedding", "blackout",
+        "eskom", "outage", "generator",
+    ],
+    "water": [
+        "water", "drought", "water shortage", "tap water", "clean water",
+        "water cuts",
+    ],
+    "housing": [
+        "housing", "accommodation", "rent", "hotel", "airbnb", "hostel",
+        "guesthouse", "expensive to stay", "place to stay",
+    ],
 }
 
 # Pre-compile one word-bounded regex per aspect so e.g. "great" doesn't match "eat".
