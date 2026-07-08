@@ -54,6 +54,26 @@ SOURCE_LABELS = {
     "reddit": "Reddit posts",
 }
 
+# Review sources (SerpApi) — these carry a 1-5 star rating.
+REVIEW_SOURCES = ("google_hotels", "tripadvisor")
+
+# Higher-level provider grouping for the sidebar "Data source" filter, so users
+# can scope to a whole provider (all its sources at once) or mix them freely.
+PROVIDER_GROUPS = {
+    "YouTube": ["youtube", "youtube_transcript"],
+    "Reviews (SerpApi)": ["google_hotels", "tripadvisor"],
+    "Reddit": ["reddit"],
+}
+
+
+def provider_of(source: str) -> str:
+    """Map a raw source to its provider group (falls back to the source name)."""
+    for group, group_sources in PROVIDER_GROUPS.items():
+        if source in group_sources:
+            return group
+    return source
+
+
 YEAR_MIN, YEAR_MAX = 2015, 2026
 
 
@@ -78,6 +98,13 @@ def load_data(path: str = str(DATA_FILE)) -> pd.DataFrame:
     df["emotion"] = df["emotion"].fillna("").astype(str)
     df["sentiment_label"] = df["sentiment_label"].fillna("neutral").astype(str)
     df["text"] = df["text"].fillna("").astype(str)
+
+    # Provider group (for the sidebar filter) + numeric star rating (reviews).
+    df["provider"] = df["source"].map(provider_of)
+    if "rating" in df.columns:
+        df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
+    else:
+        df["rating"] = pd.Series([pd.NA] * len(df), dtype="Float64")
     return df
 
 
@@ -144,6 +171,50 @@ def aspect_net(df) -> pd.DataFrame:
     piv["net"] = piv["positive"] - piv["negative"]
     piv["total"] = g.groupby("aspect")["total"].first()
     return piv.reset_index().sort_values("net")
+
+
+# --------------------------------------------------------------------------- #
+# Reviews / star-rating helpers (SerpApi)
+# --------------------------------------------------------------------------- #
+def review_frame(df) -> pd.DataFrame:
+    """Rows from review sources that carry a usable 1-5 star rating."""
+    if "rating" not in df.columns or df.empty:
+        return df.iloc[0:0]
+    return df[df["source"].isin(REVIEW_SOURCES) & df["rating"].notna()]
+
+
+def expected_sentiment_from_rating(rating):
+    """Sentiment a star rating implies: 4-5 positive, 3 neutral, 1-2 negative.
+
+    Uses 3.5 / 2.5 cutoffs so fractional aggregate ratings bucket sensibly.
+    """
+    if pd.isna(rating):
+        return None
+    if rating >= 3.5:
+        return "positive"
+    if rating >= 2.5:
+        return "neutral"
+    return "negative"
+
+
+def rating_vs_sentiment(df):
+    """Agreement between the model's sentiment and the star-implied sentiment.
+
+    Returns dict(agree, total, rate, confusion, frame) over rated reviews in
+    view, or None when there are none.
+    """
+    r = review_frame(df).copy()
+    r = r[r["sentiment_label"].isin(SENTIMENTS)]
+    if r.empty:
+        return None
+    r["expected"] = r["rating"].map(expected_sentiment_from_rating)
+    agree = int((r["expected"] == r["sentiment_label"]).sum())
+    total = int(len(r))
+    confusion = (pd.crosstab(r["expected"], r["sentiment_label"])
+                 .reindex(index=SENTIMENTS, columns=SENTIMENTS, fill_value=0))
+    return dict(agree=agree, total=total,
+                rate=(100 * agree / total if total else 0.0),
+                confusion=confusion, frame=r)
 
 
 def time_series(df, granularity: str) -> pd.DataFrame:
@@ -756,6 +827,143 @@ def render_aspect_explorer(df):
         _comment_list(box, rows, EXPLORER_CAP)
 
 
+# --------------------------------------------------------------------------- #
+# Reviews tab (SerpApi star ratings + model-vs-stars validation)
+# --------------------------------------------------------------------------- #
+def _metric_card(label, value, sub=""):
+    sub_html = f'<div class="metric-delta flat">{sub}</div>' if sub else ""
+    return (f'<div class="metric-card"><div class="metric-label">{label}</div>'
+            f'<div class="metric-value">{value}</div>{sub_html}</div>')
+
+
+def render_review_metrics(df):
+    r = review_frame(df)
+    n = len(r)
+    avg = r["rating"].mean() if n else 0
+    pct45 = 100 * (r["rating"] >= 4).mean() if n else 0
+    pct12 = 100 * (r["rating"] <= 2).mean() if n else 0
+    val = rating_vs_sentiment(df)
+    sources = ", ".join(SOURCE_LABELS.get(s, s) for s in sorted(r["source"].unique()))
+    cards = [
+        ("Reviews in view", f"{n:,}", sources),
+        ("Average rating", f"{avg:.1f} ★" if n else "—", f"{pct45:.0f}% rated 4–5★"),
+        ("Model ↔ stars agree", f"{val['rate']:.0f}%" if val else "—",
+         f"{val['agree']}/{val['total']} reviews match" if val else "no rated reviews"),
+        ("Critical (1–2★)", f"{pct12:.0f}%" if n else "—", "share of low-star reviews"),
+    ]
+    cols = st.columns(4, gap="medium")
+    for col, (label, value, sub) in zip(cols, cards):
+        col.markdown(_metric_card(label, value, sub), unsafe_allow_html=True)
+
+
+def render_rating_distribution(df):
+    st.markdown('<div class="sec-title">Star rating distribution</div>'
+                '<div class="sec-cap">How many reviews sit at each star level '
+                '(green = 4–5★, grey = 3★, red = 1–2★).</div>', unsafe_allow_html=True)
+    r = review_frame(df)
+    if r.empty:
+        st.info("No rated reviews in view.")
+        return
+    buckets = r["rating"].round().clip(1, 5).astype(int)
+    counts = buckets.value_counts().reindex([1, 2, 3, 4, 5], fill_value=0)
+    palette = {1: RED, 2: RED, 3: GREY, 4: GREEN, 5: GREEN}
+    fig = go.Figure(go.Bar(
+        x=[f"{s}★" for s in counts.index], y=[int(v) for v in counts.values],
+        marker_color=[palette[s] for s in counts.index], marker_cornerradius=6,
+        text=[int(v) for v in counts.values], textposition="outside",
+        textfont=dict(color=INK, size=13),
+        hovertemplate="%{x}: %{y} reviews<extra></extra>",
+    ))
+    style_fig(fig, height=300)
+    fig.update_yaxes(rangemode="tozero")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_rating_agreement(df):
+    st.markdown('<div class="sec-title">Model sentiment vs. star rating</div>'
+                '<div class="sec-cap">Rows = sentiment the stars imply, columns = what our '
+                'model predicted. The diagonal is agreement.</div>', unsafe_allow_html=True)
+    val = rating_vs_sentiment(df)
+    if not val:
+        st.info("No rated reviews in view.")
+        return
+    conf = val["confusion"]
+    labels = [s.capitalize() for s in SENTIMENTS]
+    fig = go.Figure(go.Heatmap(
+        z=conf.values, x=labels, y=labels,
+        text=conf.values, texttemplate="%{text}", textfont=dict(size=15, color=INK),
+        colorscale=[[0.0, "#F4F7F7"], [1.0, TEAL]], showscale=False, xgap=4, ygap=4,
+        hovertemplate="stars imply %{y}<br>model said %{x}: %{z}<extra></extra>",
+    ))
+    style_fig(fig, height=300)
+    fig.update_yaxes(autorange="reversed", title_text="Star-implied")
+    fig.update_xaxes(title_text="Model prediction", side="bottom")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.caption(f"Agreement: {val['agree']} of {val['total']} rated reviews "
+               f"({val['rate']:.0f}%). Models rarely emit ‘neutral’, so 3★ reviews "
+               f"tend to land in the off-diagonal.")
+
+
+def render_review_disagreements(df):
+    st.markdown('<div class="sec-title">Where the model and the stars disagree</div>'
+                '<div class="sec-cap">Reviews whose star rating and model sentiment point '
+                'opposite ways — most confident first. Usually mixed reviews.</div>',
+                unsafe_allow_html=True)
+    val = rating_vs_sentiment(df)
+    if not val:
+        st.info("No rated reviews in view.")
+        return
+    dis = val["frame"]
+    dis = dis[dis["expected"] != dis["sentiment_label"]].copy()
+    if dis.empty:
+        st.success("The model matches the stars on every review in view. ✓")
+        return
+    dis["absscore"] = dis["sentiment_score"].abs()
+    dis = dis.sort_values("absscore", ascending=False).head(6)
+    html = ""
+    for _, row in dis.iterrows():
+        stars = int(max(0, min(5, round(row["rating"]))))
+        star_str = "★" * stars + "☆" * (5 - stars)
+        star_color = GREEN if stars >= 4 else (RED if stars <= 2 else GREY)
+        pred_color = SENTIMENT_COLORS.get(row["sentiment_label"], GREY)
+        exp_color = SENTIMENT_COLORS.get(row["expected"], GREY)
+        text = (row["text"][:240] + "…") if len(row["text"]) > 240 else row["text"]
+        text = text.replace("<", "&lt;").replace(">", "&gt;")
+        link = (f'<a href="{row["url"]}" target="_blank">open ↗</a>'
+                if isinstance(row["url"], str) and row["url"].startswith("http") else "")
+        html += (
+            f'<div class="voice-card">'
+            f'<div class="voice-meta">'
+            f'<span><span style="color:{star_color};font-size:13px">{star_str}</span>'
+            f' &nbsp;stars imply <b style="color:{exp_color}">{row["expected"]}</b></span>'
+            f'<span>model: <b style="color:{pred_color}">{row["sentiment_label"]}</b>'
+            f' · {row["sentiment_score"]:+.2f}</span></div>'
+            f'<div class="voice-text">{text}</div>'
+            f'<div style="margin-top:8px">{link}</div></div>'
+        )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_reviews(df):
+    r = review_frame(df)
+    if r.empty:
+        st.info("No SerpApi review records for the current filters. Turn on the "
+                "**Reviews (SerpApi)** data source in the sidebar (and widen the other "
+                "filters) to see Google Hotels / Tripadvisor reviews and their ratings.")
+        return
+    render_review_metrics(df)
+    st.write("")
+    c1, c2 = st.columns(2, gap="medium")
+    with c1:
+        with st.container(border=True):
+            render_rating_distribution(df)
+    with c2:
+        with st.container(border=True):
+            render_rating_agreement(df)
+    with st.container(border=True):
+        render_review_disagreements(df)
+
+
 def render_table(df):
     st.markdown('<div class="sec-title">Browse the records</div>'
                 '<div class="sec-cap">Every mention behind the charts above.</div>',
@@ -766,7 +974,7 @@ def render_table(df):
         view = view[view["text"].str.contains(search, case=False, na=False)]
     view = view.sort_values("timestamp", ascending=False)
     show = view[[
-        "date", "source", "sentiment_label", "sentiment_score",
+        "date", "source", "sentiment_label", "sentiment_score", "rating",
         "aspects", "emotion", "engagement", "text", "url",
     ]].rename(columns={"sentiment_label": "sentiment", "sentiment_score": "score"})
     st.caption(f"{len(show):,} records match")
@@ -776,6 +984,7 @@ def render_table(df):
             "url": st.column_config.LinkColumn("link", display_text="open"),
             "text": st.column_config.TextColumn("text", width="large"),
             "score": st.column_config.NumberColumn("score", format="%+.3f"),
+            "rating": st.column_config.NumberColumn("rating", format="%.1f ★"),
             "source": st.column_config.TextColumn("source"),
         },
     )
@@ -951,11 +1160,17 @@ def main():
     aspects = st.sidebar.multiselect("Aspect (any of)", aspect_opts)
     sentiments = st.sidebar.multiselect("Sentiment", SENTIMENTS, default=SENTIMENTS)
 
-    source_opts = sorted(df["source"].unique().tolist())
-    sources = st.sidebar.multiselect(
-        "Source", source_opts, default=source_opts,
-        format_func=lambda s: SOURCE_LABELS.get(s, s),
+    # Provider-level "Data source" filter: pick whole providers (YouTube,
+    # Reviews, Reddit) and we expand them to their underlying sources.
+    present_providers = [g for g in PROVIDER_GROUPS if df["provider"].eq(g).any()]
+    extra_providers = sorted(set(df["provider"]) - set(PROVIDER_GROUPS))
+    provider_opts = present_providers + extra_providers
+    providers = st.sidebar.multiselect(
+        "Data source", provider_opts, default=provider_opts,
+        help="Filter by provider — YouTube, Reviews (Google Hotels / Tripadvisor "
+             "via SerpApi), Reddit. Pick any mix, or leave all selected.",
     )
+    sources = [s for p in providers for s in PROVIDER_GROUPS.get(p, [p])]
     kept_only = st.sidebar.toggle("Relevant records only", value=True,
                                   help="relevance_kept = True. Turn off to include everything.")
 
@@ -985,10 +1200,15 @@ def main():
     render_metric_cards(cur_m, prev_m)
     st.write("")
 
-    overview, compare, themes, voices, data = st.tabs(
-        ["Overview", "Compare", "Themes", "Voices", "Data"])
+    # The Reviews tab only appears when the dataset actually has review records.
+    has_reviews = df["source"].isin(REVIEW_SOURCES).any()
+    tab_names = ["Overview", "Compare", "Themes", "Voices"]
+    if has_reviews:
+        tab_names.append("Reviews")
+    tab_names.append("Data")
+    tabs = dict(zip(tab_names, st.tabs(tab_names)))
 
-    with overview:
+    with tabs["Overview"]:
         with st.container(border=True):
             render_ribbon(filtered, cur_m)
         with st.container(border=True):
@@ -1001,10 +1221,10 @@ def main():
             with st.container(border=True):
                 render_signals(filtered, cur_m, prev_m)
 
-    with compare:
+    with tabs["Compare"]:
         render_compare(filtered_all, granularity)
 
-    with themes:
+    with tabs["Themes"]:
         c1, c2 = st.columns(2, gap="medium")
         with c1:
             with st.container(border=True):
@@ -1015,10 +1235,14 @@ def main():
         with st.container(border=True):
             render_aspect_explorer(filtered)
 
-    with voices:
+    with tabs["Voices"]:
         render_voices(filtered)
 
-    with data:
+    if has_reviews:
+        with tabs["Reviews"]:
+            render_reviews(filtered)
+
+    with tabs["Data"]:
         with st.container(border=True):
             render_table(filtered)
 
