@@ -2,6 +2,7 @@
 # The dashboard alone only needs requirements.txt.
 praw
 requests
+serpapi
 youtube-transcript-api
 transformers
 torch

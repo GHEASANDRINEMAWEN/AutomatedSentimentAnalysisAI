@@ -33,7 +33,11 @@ from core import aspects, emotion, relevance, sentiment, store
 PROVIDERS = {
     "youtube": "providers.youtube.adapter",
     "reddit": "providers.reddit.adapter",
+    "serpapi_reviews": "providers.serpapi_reviews.adapter",
 }
+
+# Record sources produced by the SerpApi reviews provider.
+REVIEW_SOURCES = ("google_hotels", "tripadvisor")
 
 
 def load_provider(name: str):
@@ -146,6 +150,89 @@ def print_aspect_report(records):
         neg = by_sentiment[aspect].get("negative", 0)
         pct = lambda x: f"{(100 * x / total):4.0f}%" if total else "   0%"
         print(f"  {aspect:<12} {total:>5}   {pct(pos)} {pct(neu)} {pct(neg)}")
+    print("=" * 72)
+
+
+def print_review_report(records, sample: int = 5):
+    """Report the SerpApi review signal: volume, searches used, sentiment +
+    aspect breakdown, and a few sample reviews with rating + sentiment + link.
+    """
+    from collections import defaultdict
+
+    reviews = [r for r in records if r.get("source") in REVIEW_SOURCES]
+    if not reviews:
+        return
+
+    # Searches used this run, straight from the adapter (out of the 250/month tier).
+    used = limit = None
+    try:
+        from providers.serpapi_reviews import adapter as sa_adapter
+        used = sa_adapter.LAST_RUN.get("searches_used")
+        limit = sa_adapter.LAST_RUN.get("limit")
+    except Exception:
+        pass
+
+    by_source = defaultdict(int)
+    sent = defaultdict(int)
+    aspect_counts = defaultdict(int)
+    aspect_sent = defaultdict(lambda: defaultdict(int))
+    for rec in reviews:
+        by_source[rec.get("source")] += 1
+        label = rec.get("sentiment_label") or "neutral"
+        sent[label] += 1
+        for aspect in [a for a in (rec.get("aspects") or "").split(",") if a]:
+            aspect_counts[aspect] += 1
+            aspect_sent[aspect][label] += 1
+
+    n = len(reviews)
+    print()
+    print("=" * 72)
+    print("SerpApi review signal")
+    print("-" * 72)
+    print(f"  Reviews pulled       : {n}")
+    for src in REVIEW_SOURCES:
+        if by_source.get(src):
+            print(f"    - {src:<16}: {by_source[src]}")
+    if used is not None:
+        print(f"  SerpApi searches used: {used} / {limit} this run   "
+              f"(free tier: 250 / month)")
+    else:
+        print("  SerpApi searches used: n/a")
+
+    print("-" * 72)
+    print("Sentiment breakdown (reviews):")
+    for label in ("positive", "neutral", "negative"):
+        c = sent.get(label, 0)
+        pct = (100 * c / n) if n else 0
+        bar = "#" * int(pct / 2)
+        print(f"  {label:<9} {c:4d}  {pct:4.0f}%  {bar}")
+
+    print("-" * 72)
+    print("Aspect breakdown (reviews — % positive / neutral / negative):")
+    order = sorted(aspect_counts, key=aspect_counts.get, reverse=True)
+    if not order:
+        print("  (no aspect-tagged reviews)")
+    for aspect in order:
+        total = aspect_counts[aspect]
+        pct = lambda x: f"{(100 * x / total):3.0f}%" if total else "  0%"
+        pos = aspect_sent[aspect].get("positive", 0)
+        neu = aspect_sent[aspect].get("neutral", 0)
+        neg = aspect_sent[aspect].get("negative", 0)
+        print(f"  {aspect:<12} {total:4d}   pos {pct(pos)}  neu {pct(neu)}  neg {pct(neg)}")
+
+    print("-" * 72)
+    print(f"{min(sample, n)} sample reviews (rating / sentiment / text / link):")
+    for rec in reviews[:sample]:
+        text = " ".join((rec.get("text") or "").split())
+        if len(text) > 90:
+            text = text[:87] + "..."
+        rating = rec.get("rating")
+        rating_str = f"{float(rating):.1f}★" if isinstance(rating, (int, float)) else " n/a "
+        label = rec.get("sentiment_label") or "n/a"
+        value = rec.get("sentiment_score")
+        value_str = f"{value:+.3f}" if isinstance(value, (int, float)) else "  n/a "
+        print(f"\n  - [{rating_str:>5}] [{label:>8} {value_str}] {text}")
+        print(f"    {rec.get('url')}")
     print("=" * 72)
 
 
@@ -266,6 +353,8 @@ def main():
                   args.country, records, added)
     if any(r.get("source") == "youtube_transcript" for r in records):
         print_transcript_summary(records, sample=5)
+    if any(r.get("source") in REVIEW_SOURCES for r in records):
+        print_review_report(records, sample=5)
     print_aspect_report(records)
     print(f"\nCSV updated: {store.CSV_FILE}  ({rows} rows total)")
     # Aligned view of the KEPT (relevant) rows for quick eyeballing.

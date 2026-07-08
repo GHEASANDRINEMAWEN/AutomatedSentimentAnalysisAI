@@ -24,6 +24,7 @@ FIELDS = (
     "timestamp",
     "url",
     "engagement",
+    "rating",
     "sentiment_label",
     "sentiment_score",
     "aspects",
@@ -41,7 +42,8 @@ class Record:
     author: str = ""                    # display name of the author
     timestamp: str = ""                 # publish date, ISO 8601 UTC
     url: str = ""                       # direct link to the comment/post
-    engagement: int = 0                 # likes/score/upvotes
+    engagement: int = 0                 # likes/score/upvotes/helpful votes
+    rating: Optional[float] = None      # source star rating (1-5), if any
     sentiment_label: Optional[str] = None   # filled in later by core.sentiment
     sentiment_score: Optional[float] = None
     aspects: str = ""                        # filled in later by core.aspects

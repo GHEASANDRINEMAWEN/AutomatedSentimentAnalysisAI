@@ -30,6 +30,7 @@ CSV_COLUMNS = (
     "emotion",
     "relevance_kept",
     "engagement",
+    "rating",
     "url",
 )
 
