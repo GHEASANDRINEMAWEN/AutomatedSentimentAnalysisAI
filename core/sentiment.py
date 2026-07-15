@@ -1,8 +1,9 @@
 """Source-agnostic sentiment scoring with a transformer model.
 
-Uses cardiffnlp/twitter-roberta-base-sentiment-latest — a RoBERTa model
-fine-tuned on tweets, well suited to short social text (comments, transcript
-chunks). It replaces the earlier VADER scorer but keeps the SAME interface:
+Uses cardiffnlp/twitter-xlm-roberta-base-sentiment — a multilingual XLM-RoBERTa
+model fine-tuned on tweets across many languages (incl. English, French, Arabic),
+well suited to short social text (comments, transcript chunks). It replaces the
+earlier VADER scorer but keeps the SAME interface:
 
     score(records) -> records   # sets sentiment_label + sentiment_score in place
 
@@ -16,7 +17,7 @@ The model is downloaded from the Hugging Face Hub on first use and cached
 locally; no API key or per-call cost.
 """
 
-MODEL_NAME = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+MODEL_NAME = "cardiffnlp/twitter-xlm-roberta-base-sentiment"
 
 # Normalize whatever label strings the model emits to our three classes.
 _LABEL_MAP = {

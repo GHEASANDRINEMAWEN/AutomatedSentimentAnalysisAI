@@ -6,4 +6,5 @@ serpapi
 youtube-transcript-api
 transformers
 torch
+sentencepiece  # XLM-RoBERTa (multilingual sentiment) tokenizer needs this
 pandas

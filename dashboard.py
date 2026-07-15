@@ -37,9 +37,12 @@ SENTIMENTS = ["positive", "neutral", "negative"]
 SENTIMENT_COLORS = {"positive": GREEN, "neutral": GREY, "negative": RED}
 
 # Qualitative palette for per-country series in the regional-comparison view.
+# Needs at least one distinct colour per country (currently 9+), so the map in
+# country_color_map doesn't wrap and reuse a hue.
 COUNTRY_PALETTE = [
     "#127B82", "#7C6FD6", "#E8A33D", "#2E9E5B",
     "#D1495B", "#3D7DCA", "#C45BAA", "#1C8C8C",
+    "#8C6D46", "#5A6B7B", "#9BB43B", "#2E4A7A",
 ]
 
 ALL_ASPECTS = [
@@ -413,11 +416,11 @@ def delta_html(value, good_when="up", suffix="", fmt="{:+.1f}"):
 # --------------------------------------------------------------------------- #
 # Render sections
 # --------------------------------------------------------------------------- #
-def render_header(df, cur, prev):
+def render_header(df, cur, prev, country):
     if df.empty:
-        sub = "South Africa · no records for current filters"
+        sub = f"{country} · no records for current filters"
     else:
-        sub = (f"South Africa · {df['date'].min()} → {df['date'].max()} "
+        sub = (f"{country} · {df['date'].min()} → {df['date'].max()} "
                f"· {cur['n']:,} mentions")
     d = None if prev["n"] == 0 else cur["perception"] - prev["perception"]
     if d is None:
@@ -1196,7 +1199,7 @@ def main():
                        "follow the Country picker above.")
 
     # ----- Header + metric cards -----
-    render_header(filtered, cur_m, prev_m)
+    render_header(filtered, cur_m, prev_m, country)
     if filtered.empty:
         # Explain the empty view instead of showing a wall of zeros. The most
         # common dead-end: a Data source that has no rows for the chosen country

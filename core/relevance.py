@@ -11,7 +11,10 @@ be reviewed. `kept(records)` is a convenience for the ones that passed.
 import re
 
 # Travel/tourism intent words and phrases (substring match on lowercased text).
+# English "visit"/"tour" already cover French "visiter"/"tourisme" by substring,
+# but accented and Arabic forms share no stem with them and need listing.
 KEYWORDS = (
+    # English
     "visit", "travel", "trip", "tour", "tourist", "tourism", "safari",
     "vacation", "holiday", "itinerary", "flight", "fly to", "hotel",
     "accommodation", "hostel", "backpack", "road trip", "beach", "wildlife",
@@ -20,9 +23,20 @@ KEYWORDS = (
     "plan to", "i'm going", "im going", "we went", "i went", "stayed in",
     "safe to", "is it safe", "how safe", "beautiful", "stunning", "gorgeous",
     "must visit", "worth visiting", "can't wait to", "cant wait to",
+    # French
+    "voyage", "vacances", "séjour", "sejour", "plage", "hôtel", "magnifique",
+    "superbe", "découvrir", "decouvrir", "envie d'aller", "je veux aller",
+    "j'ai visité", "beau pays", "aller au", "partir au", "c'est sûr",
+    "est-ce que c'est sûr",
+    # Arabic
+    "سياحة", "سافر", "السفر", "زيارة", "أزور", "زرت", "رحلة", "فندق",
+    "شاطئ", "جميل", "رائع", "آمنة", "هل هي آمنة",
 )
 
 # Destination/place names — a strong signal the comment is about the place.
+# Matched as substrings, so entries must not appear inside unrelated words:
+# bare "nile" would hit "juvenile", "fes" would hit "manifesto", "limbe" would
+# hit "climbers". Where a name is short or ambiguous, qualify it instead.
 PLACES = (
     # South Africa
     "south africa", "cape town", "johannesburg", "joburg", "jozi", "durban",
@@ -41,6 +55,32 @@ PLACES = (
     "tanzania", "zanzibar", "serengeti", "kilimanjaro", "ngorongoro",
     "dar es salaam", "arusha", "stone town", "dodoma", "mafia island",
     "tarangire", "pemba", "moshi", "selous",
+    # Egypt
+    "egypt", "cairo", "giza", "pyramid", "sphinx", "luxor", "aswan",
+    "the nile", "nile river", "nile cruise", "felucca", "sharm el sheikh",
+    "sharm", "hurghada", "alexandria", "red sea", "valley of the kings",
+    "abu simbel", "dahab", "siwa", "karnak", "egyptian museum",
+    "khan el khalili", "coptic cairo", "grand egyptian museum",
+    "مصر", "القاهرة", "الأهرامات", "الاهرامات", "الجيزة", "الأقصر", "أسوان",
+    "شرم الشيخ", "الغردقة", "الإسكندرية", "البحر الأحمر", "النيل",
+    # Senegal
+    "senegal", "sénégal", "dakar", "goree", "gorée", "saint-louis",
+    "saint louis", "lake retba", "lac rose", "pink lake", "casamance",
+    "sine saloum", "thiès", "ziguinchor", "djoudj", "african renaissance",
+    # Ghana
+    "ghana", "accra", "kumasi", "cape coast", "kakum", "elmina", "takoradi",
+    "tamale", "labadi", "mole national park", "lake volta", "volta region",
+    "osu castle", "aburi",
+    # Morocco
+    "morocco", "maroc", "marrakech", "marrakesh", "casablanca", "fez",
+    "chefchaouen", "rabat", "tangier", "essaouira", "merzouga", "sahara",
+    "atlas mountains", "agadir", "meknes", "ouarzazate", "jemaa el",
+    "hassan ii", "ait ben haddou",
+    "المغرب", "مراكش", "الدار البيضاء", "الرباط", "طنجة", "الصحراء",
+    # Cameroon
+    "cameroon", "cameroun", "yaounde", "yaoundé", "douala", "kribi",
+    "mount cameroon", "limbe beach", "bamenda", "buea", "foumban", "waza",
+    "korup", "dschang",
 )
 
 # Phrases that mark a comment as directed at the creator / low-signal chatter.
@@ -56,7 +96,10 @@ CREATOR_PHRASES = (
 
 
 def _words(text: str):
-    return re.findall(r"[a-z']+", text.lower())
+    # [^\W\d_] matches a letter in ANY script, so Arabic and accented French
+    # tokenize instead of collapsing to zero words and being dropped by the
+    # length guard in is_relevant().
+    return re.findall(r"[^\W\d_]+", text.lower())
 
 
 def is_relevant(text: str) -> bool:

@@ -68,6 +68,81 @@ QUERIES = {
         "Arusha travel",
         "Tanzania tourist tips",
     ],
+    "Ghana": [
+        "Ghana travel guide",
+        "things to do in Ghana",
+        "is Ghana safe for tourists",
+        "Ghana travel vlog",
+        "visiting Accra",
+        "Cape Coast Castle Ghana",
+        "Ghana itinerary",
+        "Kakum National Park Ghana",
+        "Accra vlog",
+        "Ghana holiday",
+        "best places to visit Ghana",
+        "Kumasi travel",
+        "Ghana tourist tips",
+    ],
+    "Senegal": [
+        "Senegal travel guide",
+        "things to do in Senegal",
+        "is Senegal safe for tourists",
+        "Senegal travel vlog",
+        "visiting Dakar",
+        "Goree Island Senegal",
+        "Senegal itinerary",
+        "Lake Retba Senegal",
+        "Dakar vlog",
+        "Senegal holiday",
+        "best places to visit Senegal",
+        "Saint-Louis travel",
+        "Senegal tourist tips",
+    ],
+    "Morocco": [
+        "Morocco travel guide",
+        "things to do in Morocco",
+        "is Morocco safe for tourists",
+        "Morocco travel vlog",
+        "visiting Marrakech",
+        "Sahara desert tour Morocco",
+        "Morocco itinerary",
+        "Chefchaouen Morocco",
+        "Marrakech vlog",
+        "Morocco holiday",
+        "best places to visit Morocco",
+        "Fes travel",
+        "Morocco tourist tips",
+    ],
+    "Egypt": [
+        "Egypt travel guide",
+        "things to do in Egypt",
+        "is Egypt safe for tourists",
+        "Egypt travel vlog",
+        "visiting Cairo",
+        "Pyramids of Giza",
+        "Egypt itinerary",
+        "Luxor temples Egypt",
+        "Cairo vlog",
+        "Egypt holiday",
+        "best places to visit Egypt",
+        "Aswan travel",
+        "Egypt tourist tips",
+    ],
+    "Cameroon": [
+        "Cameroon travel guide",
+        "things to do in Cameroon",
+        "is Cameroon safe for tourists",
+        "Cameroon travel vlog",
+        "visiting Yaounde",
+        "Mount Cameroon hike",
+        "Cameroon itinerary",
+        "Kribi beach Cameroon",
+        "Yaounde vlog",
+        "Cameroon holiday",
+        "best places to visit Cameroon",
+        "Douala travel",
+        "Cameroon tourist tips",
+    ],
 }
 
 # Optional ISO 3166-1 alpha-2 region bias per country (improves relevance).
@@ -76,6 +151,24 @@ REGION_CODES = {
     "Rwanda": "RW",
     "Kenya": "KE",
     "Tanzania": "TZ",
+    "Ghana": "GH",
+    "Senegal": "SN",
+    "Morocco": "MA",
+    "Egypt": "EG",
+    "Cameroon": "CM",
+}
+
+# Optional relevanceLanguage bias per country (ISO 639-1). Steers the YouTube
+# search toward content in the market's main language; countries with no entry
+# fall back to English (see RELEVANCE_LANGUAGE_DEFAULT). This only biases which
+# videos are surfaced — it does NOT translate or re-score comments.
+RELEVANCE_LANGUAGE_DEFAULT = "en"
+RELEVANCE_LANGUAGES = {
+    "Ghana": "en",
+    "Senegal": "fr",
+    "Morocco": "ar",
+    "Egypt": "ar",
+    "Cameroon": "fr",
 }
 
 # --- Year sweep ------------------------------------------------------------

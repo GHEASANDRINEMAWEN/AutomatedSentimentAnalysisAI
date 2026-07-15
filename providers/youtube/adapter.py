@@ -80,7 +80,7 @@ def _get(url: str, params: dict) -> dict:
 
 
 def _search_videos(query, region_code, max_videos, published_after=None,
-                   published_before=None):
+                   published_before=None, relevance_language="en"):
     """Return [(video_id, snippet), ...] for a search query, optionally dated."""
     params = {
         "part": "snippet",
@@ -89,7 +89,7 @@ def _search_videos(query, region_code, max_videos, published_after=None,
         "maxResults": min(max_videos, 50),
         "order": "relevance",
         "safeSearch": "none",
-        "relevanceLanguage": "en",
+        "relevanceLanguage": relevance_language,
     }
     if region_code:
         params["regionCode"] = region_code
@@ -139,7 +139,7 @@ def _video_comments(video_id, max_comments, order="relevance"):
     return items
 
 
-def _discover_videos(queries, region):
+def _discover_videos(queries, region, relevance_language="en"):
     """Sweep videos per year so comment dates spread across the timeline.
 
     Returns an ordered dict: video_id -> {year, channel, published_at}, videos
@@ -157,6 +157,7 @@ def _discover_videos(queries, region):
                 items = _search_videos(
                     query, region, yt_config.VIDEOS_PER_QUERY_PER_YEAR,
                     published_after=after, published_before=before,
+                    relevance_language=relevance_language,
                 )
             except YouTubeError as exc:
                 print(f"  ! search failed {query!r} {year}: {exc}")
@@ -260,9 +261,12 @@ def fetch(country, queries=None, max_results=None):
     if max_results is None:
         max_results = yt_config.MAX_RESULTS_DEFAULT  # may stay None
     region = yt_config.REGION_CODES.get(country)
+    language = yt_config.RELEVANCE_LANGUAGES.get(
+        country, yt_config.RELEVANCE_LANGUAGE_DEFAULT
+    )
 
     print(f"  discovering videos across {yt_config.YEAR_START}-{yt_config.YEAR_END} ...")
-    videos = _discover_videos(queries, region)
+    videos = _discover_videos(queries, region, relevance_language=language)
     print(f"  collected {len(videos)} videos; pulling comments ...")
 
     records = []
