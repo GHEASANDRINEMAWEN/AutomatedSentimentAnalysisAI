@@ -19,6 +19,8 @@ FIELDS = (
     "source",
     "source_id",
     "country",
+    "country_query",
+    "country_source",
     "text",
     "author",
     "timestamp",
@@ -39,6 +41,10 @@ class Record:
     source_id: str                      # platform-unique id (used for dedupe)
     country: str                        # country the item is about
     text: str                           # the comment/post text
+    # Attribution provenance, filled in by core.geo: the country whose query
+    # pulled the item, and which tier decided `country` (content/context/query).
+    country_query: str = ""
+    country_source: str = ""
     author: str = ""                    # display name of the author
     timestamp: str = ""                 # publish date, ISO 8601 UTC
     url: str = ""                       # direct link to the comment/post

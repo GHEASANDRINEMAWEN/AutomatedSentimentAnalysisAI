@@ -28,7 +28,7 @@ try:
 except (AttributeError, ValueError):
     pass
 
-from core import aspects, emotion, relevance, sentiment, store
+from core import aspects, emotion, geo, relevance, sentiment, store
 
 PROVIDERS = {
     "youtube": "providers.youtube.adapter",
@@ -311,11 +311,36 @@ def print_table(records, limit: int = 20):
 def analyze(records):
     """Run the full source-agnostic analysis layer over records (in place)."""
     relevance.mark(records)   # mark, don't drop — filtered rows stay for review
+    geo.assign(records)       # re-home each record on the country it is ABOUT
     print("  scoring sentiment with transformer (first run downloads the model) ...")
     sentiment.score(records)
     aspects.tag(records)
     emotion.tag(records)
     return records
+
+
+def print_attribution_report(records):
+    """Show how country attribution was decided, and what it moved."""
+    stats = geo.summary(records)
+    tiers = stats["tiers"]
+    total = len(records) or 1
+    print()
+    print("=" * 72)
+    print("Country attribution (what each record is ABOUT, not what pulled it)")
+    print("-" * 72)
+    for tier, label in (("content", "own text names the country"),
+                        ("context", "inherited from its video's other records"),
+                        ("query",   "no evidence — kept the search country")):
+        count = tiers.get(tier, 0)
+        print(f"  {tier:<8} {count:6d}  {100 * count / total:5.1f}%   {label}")
+    print(f"  {'moved':<8} {stats['moved_total']:6d}  "
+          f"{100 * stats['moved_total'] / total:5.1f}%   re-homed to another country")
+    if stats["moved"]:
+        print("-" * 72)
+        print("Top reassignments:")
+        for pair, count in stats["moved"].most_common(12):
+            print(f"  {pair:<34} {count:5d}")
+    print("=" * 72)
 
 
 def main():
@@ -332,7 +357,27 @@ def main():
         "--reprocess", action="store_true",
         help="Skip fetching; re-analyze every record already in the store.",
     )
+    parser.add_argument(
+        "--reassign-countries", action="store_true",
+        help="Skip fetching; re-derive country attribution over the whole store. "
+             "Cheap (no model) — unlike --reprocess it does not re-score sentiment.",
+    )
     args = parser.parse_args()
+
+    if args.reassign_countries:
+        records = store.read_all()
+        print(f"Re-attributing countries over {len(records)} stored records ...")
+        geo.assign(records)
+        store.rewrite(records)
+        rows = store.export_csv()
+        print_attribution_report(records)
+        from collections import Counter
+        counts = Counter(r.get("country") for r in records)
+        print("\nRecords per country after attribution:")
+        for name, count in counts.most_common():
+            print(f"  {name:<16}{count:6d}")
+        print(f"\nCSV updated: {store.CSV_FILE}  ({rows} rows total)")
+        return
 
     if args.reprocess:
         records = store.read_all()
@@ -343,7 +388,12 @@ def main():
     else:
         provider = load_provider(args.provider)
         print(f"Fetching {args.provider} for {args.country!r} ...")
-        records = provider.fetch(args.country, max_results=args.max_results)
+        try:
+            records = provider.fetch(args.country, max_results=args.max_results)
+        except RuntimeError as exc:
+            # Missing credentials and quota errors are configuration problems,
+            # not bugs — say what to fix instead of dumping a traceback.
+            raise SystemExit(f"\n{args.provider}: {exc}")
         print(f"Fetched {len(records)} records. Analyzing ...")
         analyze(records)
         added = store.append(records)
@@ -355,6 +405,7 @@ def main():
         print_transcript_summary(records, sample=5)
     if any(r.get("source") in REVIEW_SOURCES for r in records):
         print_review_report(records, sample=5)
+    print_attribution_report(records)
     print_aspect_report(records)
     print(f"\nCSV updated: {store.CSV_FILE}  ({rows} rows total)")
     # Aligned view of the KEPT (relevant) rows for quick eyeballing.

@@ -42,6 +42,27 @@ PLACES = {
         "hotels Johannesburg",
         "hotels Durban",
     ],
+    "Nigeria": [
+        "Eko Hotel and Suites Lagos",
+        "Transcorp Hilton Abuja",
+        "Lekki Conservation Centre Lagos",
+        "hotels Victoria Island Lagos",
+        "Obudu Mountain Resort Nigeria",
+    ],
+    "Ghana": [
+        "Cape Coast Castle Ghana",
+        "Kempinski Hotel Gold Coast City Accra",
+        "Kakum National Park Ghana",
+        "Labadi Beach Hotel Accra",
+        "hotels Kumasi Ghana",
+    ],
+    "Zimbabwe": [
+        "Victoria Falls Zimbabwe",
+        "Victoria Falls Hotel Zimbabwe",
+        "Hwange National Park lodges",
+        "Great Zimbabwe National Monument",
+        "hotels Harare Zimbabwe",
+    ],
 }
 
 # Which SerpApi review engines to pull from for each place.

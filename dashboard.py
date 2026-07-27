@@ -19,6 +19,15 @@ from plotly.subplots import make_subplots
 
 DATA_FILE = Path(__file__).parent / "data" / "records.csv"
 
+# The PDF report pulls in matplotlib + reportlab. Import it defensively so a
+# deployment that has not picked up the new requirements yet still serves the
+# dashboard — the button explains itself instead of the whole app 500-ing.
+try:
+    from core import report as report_pdf
+    REPORT_ERROR = ""
+except ImportError as exc:                                  # pragma: no cover
+    report_pdf, REPORT_ERROR = None, str(exc)
+
 # --------------------------------------------------------------------------- #
 # Design tokens
 # --------------------------------------------------------------------------- #
@@ -1138,6 +1147,79 @@ def render_compare(df_all, granularity):
 
 
 # --------------------------------------------------------------------------- #
+# Report export
+# --------------------------------------------------------------------------- #
+def _slug(text: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in str(text).lower()).strip("-")
+
+
+def report_filename(country, year_range) -> str:
+    lo, hi = year_range
+    span = f"{lo}" if lo == hi else f"{lo}-{hi}"
+    return f"africa-insights-{_slug(country)}-{span}.pdf"
+
+
+def render_report_export(filtered, *, country, year_range, granularity,
+                         aspects, sentiments, providers, kept_only):
+    """Sidebar 'Generate report' button -> branded PDF of the CURRENT view.
+
+    Building the PDF renders four charts, so it runs on an explicit click rather
+    than on every rerun. The result is held in session state alongside the filter
+    signature that produced it and dropped the moment the filters change, so the
+    download can never hand back a PDF describing a different view.
+    """
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Report**")
+
+    if report_pdf is None:
+        st.sidebar.warning(
+            f"PDF export unavailable — install `reportlab` and `matplotlib` "
+            f"({REPORT_ERROR}).", icon="⚠️")
+        return
+
+    signature = (country, tuple(year_range), granularity, tuple(sorted(aspects)),
+                 tuple(sorted(sentiments)), tuple(sorted(providers)), kept_only,
+                 len(filtered))
+    if st.session_state.get("report_signature") != signature:
+        st.session_state.pop("report_bytes", None)
+
+    filters = {
+        "Country": country,
+        "Year range": f"{year_range[0]}–{year_range[1]} (by {granularity.lower()})",
+        "Aspect (any of)": ", ".join(aspects) if aspects else "all aspects",
+        "Sentiment": ", ".join(sentiments) if sentiments else "all",
+        "Data source": ", ".join(providers) if providers else "all",
+        "Relevant records only": "yes" if kept_only else "no",
+    }
+
+    disabled = filtered.empty
+    if st.sidebar.button("📄 Generate report", use_container_width=True,
+                         type="primary", disabled=disabled,
+                         help="Build a PDF of exactly this filtered view — "
+                              "charts plus a written summary."):
+        with st.spinner("Building the report …"):
+            try:
+                st.session_state["report_bytes"] = report_pdf.build_pdf(
+                    filtered, country=country, granularity=granularity,
+                    filters=filters)
+                st.session_state["report_signature"] = signature
+            except Exception as exc:                        # pragma: no cover
+                st.session_state.pop("report_bytes", None)
+                st.sidebar.error(f"Could not build the report: {exc}")
+    if disabled:
+        st.sidebar.caption("No records in view — widen the filters to enable.")
+
+    data = st.session_state.get("report_bytes")
+    if data:
+        st.sidebar.download_button(
+            "⬇️ Download PDF", data=data,
+            file_name=report_filename(country, year_range),
+            mime="application/pdf", use_container_width=True)
+        st.sidebar.caption(f"Ready — {len(filtered):,} records, "
+                           f"{len(data) / 1024:,.0f} KB.")
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def main():
@@ -1197,6 +1279,11 @@ def main():
     st.sidebar.caption(f"Showing **{len(filtered):,}** of {len(df):,} records")
     st.sidebar.caption("The **Compare** tab spans all countries; the other tabs "
                        "follow the Country picker above.")
+
+    render_report_export(filtered, country=country, year_range=year_range,
+                         granularity=granularity, aspects=aspects,
+                         sentiments=sentiments, providers=providers,
+                         kept_only=kept_only)
 
     # ----- Header + metric cards -----
     render_header(filtered, cur_m, prev_m, country)

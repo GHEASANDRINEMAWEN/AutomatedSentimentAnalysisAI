@@ -69,6 +69,10 @@ QUERIES = {
         "Tanzania tourist tips",
     ],
     "Ghana": [
+        "Ghana travel",
+        "Ghana tourism",
+        "visit Accra",
+        "Cape Coast Ghana",
         "Ghana travel guide",
         "things to do in Ghana",
         "is Ghana safe for tourists",
@@ -128,6 +132,36 @@ QUERIES = {
         "Aswan travel",
         "Egypt tourist tips",
     ],
+    "Nigeria": [
+        "Nigeria travel",
+        "Nigeria travel guide",
+        "things to do in Nigeria",
+        "is Nigeria safe for tourists",
+        "Nigeria travel vlog",
+        "visit Lagos",
+        "Lagos Nigeria vlog",
+        "Nigeria tourism",
+        "Nigeria itinerary",
+        "Abuja travel",
+        "Calabar carnival Nigeria",
+        "Obudu Mountain Resort",
+        "best places to visit Nigeria",
+    ],
+    "Zimbabwe": [
+        "Zimbabwe travel",
+        "Zimbabwe travel guide",
+        "things to do in Zimbabwe",
+        "is Zimbabwe safe for tourists",
+        "visit Zimbabwe",
+        "Victoria Falls",
+        "Zimbabwe safari",
+        "Hwange National Park",
+        "Zimbabwe itinerary",
+        "visiting Harare",
+        "Great Zimbabwe ruins",
+        "Matobo Hills Zimbabwe",
+        "best places to visit Zimbabwe",
+    ],
     "Cameroon": [
         "Cameroon travel guide",
         "things to do in Cameroon",
@@ -156,6 +190,8 @@ REGION_CODES = {
     "Morocco": "MA",
     "Egypt": "EG",
     "Cameroon": "CM",
+    "Nigeria": "NG",
+    "Zimbabwe": "ZW",
 }
 
 # Optional relevanceLanguage bias per country (ISO 639-1). Steers the YouTube
@@ -165,6 +201,8 @@ REGION_CODES = {
 RELEVANCE_LANGUAGE_DEFAULT = "en"
 RELEVANCE_LANGUAGES = {
     "Ghana": "en",
+    "Nigeria": "en",
+    "Zimbabwe": "en",
     "Senegal": "fr",
     "Morocco": "ar",
     "Egypt": "ar",

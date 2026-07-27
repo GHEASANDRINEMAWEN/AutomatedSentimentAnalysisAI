@@ -21,6 +21,8 @@ CSV_FILE = DATA_DIR / "records.csv"
 CSV_COLUMNS = (
     "source",
     "country",
+    "country_query",
+    "country_source",
     "timestamp",
     "author",
     "text",

@@ -71,6 +71,17 @@ PLACES = (
     "ghana", "accra", "kumasi", "cape coast", "kakum", "elmina", "takoradi",
     "tamale", "labadi", "mole national park", "lake volta", "volta region",
     "osu castle", "aburi",
+    # Nigeria — bare "kano" is unusable (it is inside "volcano"), so the city is
+    # listed only in its qualified form.
+    "nigeria", "lagos", "abuja", "calabar", "benin city", "ibadan",
+    "port harcourt", "kano state", "kano city", "yankari", "obudu",
+    "olumo rock", "zuma rock", "idanre", "lekki", "badagry", "niger delta",
+    "oshogbo", "osogbo", "eko atlantic", "nike art", "erin ijesha",
+    # Zimbabwe
+    "zimbabwe", "harare", "victoria falls", "vic falls", "bulawayo", "hwange",
+    "matobo", "matopos", "mana pools", "lake kariba", "kariba dam", "nyanga",
+    "eastern highlands", "chimanimani", "gonarezhou", "mutare", "masvingo",
+    "chinhoyi", "zambezi", "great zimbabwe",
     # Morocco
     "morocco", "maroc", "marrakech", "marrakesh", "casablanca", "fez",
     "chefchaouen", "rabat", "tangier", "essaouira", "merzouga", "sahara",

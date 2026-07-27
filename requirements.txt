@@ -3,3 +3,5 @@
 streamlit
 plotly
 pandas
+matplotlib    # charts drawn into the PDF report
+reportlab     # PDF assembly for the "Generate report" button

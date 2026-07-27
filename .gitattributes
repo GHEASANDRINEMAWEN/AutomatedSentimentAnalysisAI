@@ -1,0 +1,2 @@
+# Generated reports are binary — never let autocrlf rewrite their bytes.
+*.pdf binary
