@@ -25,6 +25,8 @@ core/
   record.py         # the shared common record + timestamp normalization
   relevance.py      # mark(records): is each comment about travel/tourism?
   geo.py            # assign(records): which country is the text actually ABOUT?
+  rails.py          # shared honesty thresholds — what counts as enough evidence
+  segments.py       # tag(records): visitor segment (adventure/luxury/business/budget)
   sentiment.py      # score(records): transformer sentiment (roberta) — source-agnostic
   aspects.py        # tag(records): travel topics mentioned (rule-based, swappable)
   emotion.py        # tag(records): a single emotion cue (rule-based, swappable)
@@ -82,6 +84,13 @@ Every record is enriched by source-agnostic analyzers in `core/`:
   comma-separated `aspects` column (blank if none).
 - **Emotion** (`emotion.py`) — a single lightweight `emotion` label
   (`excited / disappointed / fearful / longing / neutral`) from keyword cues.
+- **Segments** (`segments.py`) — a visitor-segment label in the `segment` column
+  (`adventure / luxury / business / budget / unclassified`), scored by distinct
+  keyword hits so overlapping vocabularies resolve sensibly ("we hiked to the
+  ruins then stayed at a cheap hostel" is budget, not adventure). Roughly **9%
+  of records carry a travel-style signal** — the rest are genuinely
+  unclassifiable ("beautiful country, love the people"), and are left that way
+  rather than guessed, which would poison every cohort average.
 
 The aspect and emotion taggers are **swappable by design**: each exposes
 `tag(records)` that fills its column, so an LLM-based tagger can replace the
@@ -113,8 +122,25 @@ comment section.
 Re-derive attribution over the stored data at any time — it needs no model and
 takes seconds:
 ```bash
-python run.py --reassign-countries
+python run.py --reassign-countries    # attribution only
+python run.py --retag                 # every rule-based tagger, incl. segments
 ```
+
+### Honesty rails
+`core/rails.py` holds one set of thresholds shared by the dashboard and the PDF
+report, so the two can never disagree about what counts as enough evidence:
+
+| rail | value | meaning |
+|---|---|---|
+| `MIN_SAMPLE` | 50 records | below this a view is flagged indicative, not reliable |
+| `MIN_ASPECT_MENTIONS` | 15 mentions | below this an aspect cannot headline or be compared |
+| `NET_MARGIN` | 5 points | below this a theme is an even split, not praised/criticised |
+| `GAP_MARGIN` | 10 points | below this a cross-country gap is not worth stating |
+
+Every view that can slice thin honours them: heatmap cells under the mention
+floor render blank rather than as noise, thin cohorts are marked ⚠ and excluded
+from rankings, and benchmark gaps are only computed where **both** sides clear
+the floor.
 
 ### Relevance filter
 `core/relevance.py` marks each record with **`relevance_kept`** (True/False)
@@ -147,6 +173,24 @@ python -m streamlit run dashboard.py
 ```
 Reads `data/records.csv` and serves the filterable perception dashboard. It is
 deployable as-is on Streamlit Community Cloud — point it at `dashboard.py`.
+
+Tabs: **Overview**, **Compare** (cross-country, including the competitive
+benchmark below), **Themes**, **Segments**, **Voices**, **Reviews**, **Data**.
+The sidebar filters country, years, aspect, sentiment, visitor segment and data
+source; every tab and the PDF report follow them.
+
+#### Segments tab
+Perception and per-aspect net sentiment broken down by traveller cohort — the
+"luxury travellers rate hospitality X, business travellers rate Y" view. Cohorts
+under `MIN_SAMPLE` are marked ⚠ and never ranked; aspect×segment cells under
+`MIN_ASPECT_MENTIONS` render blank.
+
+#### Competitive benchmark (Compare tab)
+Pick any 2+ countries and a benchmark, and every rival is scored against it per
+aspect: net-sentiment gap, complaint-share ratio, and a written finding such as
+*"South Africa trails Zimbabwe on safety: −39 net vs +17 — a 56-point deficit
+(135 vs 23 mentions). Complaint share is 87% higher."* Gaps are only computed
+where both sides clear the mention floor, and thin countries raise a banner.
 
 ### PDF report
 The sidebar's **Generate report** button renders the *current filtered view* —

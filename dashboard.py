@@ -17,6 +17,9 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from core import rails
+from core.segments import UNCLASSIFIED
+
 DATA_FILE = Path(__file__).parent / "data" / "records.csv"
 
 # The PDF report pulls in matplotlib + reportlab. Import it defensively so a
@@ -58,6 +61,27 @@ ALL_ASPECTS = [
     "food", "scenery", "safety", "wildlife", "hospitality", "transport", "cost",
     "weather", "electricity", "water", "housing",
 ]
+# Visitor segments, in the order they are shown everywhere. "unclassified" is
+# always last: it is the majority bucket (most comments carry no travel-style
+# signal at all) and must never be mistaken for a finding.
+SEGMENTS_ORDER = ["adventure", "luxury", "business", "budget", UNCLASSIFIED]
+SEGMENT_LABELS = {
+    "adventure": "Adventure / nature",
+    "luxury": "Luxury / leisure",
+    "business": "Business",
+    "budget": "Budget / backpacker",
+    UNCLASSIFIED: "Unclassified",
+}
+# Distinct hues for the four real segments; unclassified stays neutral grey so it
+# reads as "no signal" rather than as a fifth category of traveller.
+SEGMENT_COLORS = {
+    "adventure": "#2E9E5B",
+    "luxury": "#7C6FD6",
+    "business": "#3D7DCA",
+    "budget": "#E8A33D",
+    UNCLASSIFIED: "#C3CCCD",
+}
+
 SOURCE_LABELS = {
     "youtube": "YouTube comments",
     "youtube_transcript": "YouTube transcripts",
@@ -108,6 +132,13 @@ def load_data(path: str = str(DATA_FILE)) -> pd.DataFrame:
     df["relevance_kept"] = df["relevance_kept"].astype(str).str.lower().eq("true")
     df["aspects"] = df["aspects"].fillna("").astype(str)
     df["emotion"] = df["emotion"].fillna("").astype(str)
+    # `segment` arrives with the data; default it so a CSV written before the
+    # tagger existed still loads (every row simply reads as unclassified).
+    if "segment" in df.columns:
+        df["segment"] = (df["segment"].fillna("").astype(str)
+                         .replace("", UNCLASSIFIED))
+    else:
+        df["segment"] = UNCLASSIFIED
     df["sentiment_label"] = df["sentiment_label"].fillna("neutral").astype(str)
     df["text"] = df["text"].fillna("").astype(str)
 
@@ -120,7 +151,8 @@ def load_data(path: str = str(DATA_FILE)) -> pd.DataFrame:
     return df
 
 
-def filter_data(df, *, country, year_range, aspects, sentiments, sources, kept_only):
+def filter_data(df, *, country, year_range, aspects, sentiments, sources,
+                kept_only, segments=None):
     """Apply the sidebar filters and return the filtered frame."""
     out = df
     if country and country != "All":
@@ -133,6 +165,8 @@ def filter_data(df, *, country, year_range, aspects, sentiments, sources, kept_o
         out = out[out["sentiment_label"].isin(sentiments)]
     if sources:
         out = out[out["source"].isin(sources)]
+    if segments:
+        out = out[out["segment"].isin(segments)]
     if aspects:
         pattern = "|".join(rf"(?:^|,){a}(?:,|$)" for a in aspects)
         out = out[out["aspects"].str.contains(pattern, regex=True, na=False)]
@@ -246,6 +280,125 @@ def time_series(df, granularity: str) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
+# Visitor segments
+# --------------------------------------------------------------------------- #
+def _a(number) -> str:
+    """"a" or "an" for a number read aloud — an 8-point, an 11-point, a 23-point.
+
+    Generated sentences are read by people; "a 18-point deficit" is the kind of
+    tell that makes an auto-written finding look untrustworthy.
+    """
+    digits = f"{abs(int(round(number)))}"
+    vowel = digits.startswith(("8", "11", "18")) and digits not in ("1", "10")
+    return "an" if vowel else "a"
+
+
+def segment_metrics(df) -> pd.DataFrame:
+    """One row per visitor segment with headline metrics, richest segment first.
+
+    `thin` marks segments carrying too few records to read confidently — the
+    caller must label or suppress those rather than ranking them.
+    """
+    columns = ["segment", "label", "mentions", "perception", "net",
+               "positive", "neutral", "negative", "thin"]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for segment, g in df.groupby("segment"):
+        m = summarize(g)
+        rows.append(dict(
+            segment=segment, label=SEGMENT_LABELS.get(segment, segment.capitalize()),
+            mentions=m["n"], perception=m["perception"], net=m["net"],
+            positive=m["pos"], neutral=m["neu"], negative=m["neg"],
+            thin=rails.is_thin(m["n"]),
+        ))
+    out = pd.DataFrame(rows)
+    out["order"] = out["segment"].map(
+        {s: i for i, s in enumerate(SEGMENTS_ORDER)}).fillna(99)
+    return out.sort_values(["order", "mentions"], ascending=[True, False]).drop(
+        columns="order").reset_index(drop=True)
+
+
+def segment_aspect_net(df, *, min_mentions: int = None) -> pd.DataFrame:
+    """Matrix (rows=segment, cols=aspect) of net sentiment.
+
+    Cells backed by fewer than `min_mentions` mentions are returned as NaN —
+    a segment/aspect pair with three comments has no readable net sentiment, and
+    blanking it is the only honest render.
+    """
+    if min_mentions is None:
+        min_mentions = rails.MIN_ASPECT_MENTIONS
+    if df.empty:
+        return pd.DataFrame(columns=ALL_ASPECTS)
+    series, counts = {}, {}
+    for segment, g in df.groupby("segment"):
+        net = aspect_net(g)
+        if net.empty:
+            continue
+        indexed = net.set_index("aspect")
+        series[segment] = indexed["net"]
+        counts[segment] = indexed["total"]
+    if not series:
+        return pd.DataFrame(columns=ALL_ASPECTS)
+    values = pd.DataFrame(series).T.reindex(columns=ALL_ASPECTS)
+    volume = pd.DataFrame(counts).T.reindex(columns=ALL_ASPECTS)
+    return values.where(volume.fillna(0) >= min_mentions)
+
+
+def segment_signals(df, metrics: pd.DataFrame) -> list:
+    """Auto-written takeaways comparing segments: [(color, text), ...].
+
+    Only segments and aspect cells that clear the honesty rails are allowed to
+    appear, so nothing here rests on a handful of comments.
+    """
+    out = []
+    real = metrics[metrics["segment"] != UNCLASSIFIED]
+    solid = real[~real["thin"]]
+    classified = int(real["mentions"].sum())
+    total = int(metrics["mentions"].sum())
+    if total:
+        out.append((TEAL, f"<b>{100 * classified / total:.0f}%</b> of records in "
+                          f"view carry a travel-style signal "
+                          f"({classified:,} of {total:,}); the rest are "
+                          f"unclassified."))
+    if len(solid) >= 2:
+        best = solid.loc[solid["perception"].idxmax()]
+        worst = solid.loc[solid["perception"].idxmin()]
+        out.append((GREEN, f"<b>{best['label']}</b> travellers are the most "
+                           f"positive cohort ({best['perception']}/100 over "
+                           f"{int(best['mentions']):,} mentions)."))
+        out.append((RED, f"<b>{worst['label']}</b> travellers are the most "
+                         f"critical ({worst['perception']}/100 over "
+                         f"{int(worst['mentions']):,} mentions) — "
+                         f"{_a(best['perception'] - worst['perception'])} "
+                         f"{best['perception'] - worst['perception']:.0f}-point "
+                         f"spread against {best['label'].lower()}."))
+    elif not real.empty:
+        out.append((GREY, f"Only {len(solid)} segment(s) clear the "
+                          f"{rails.MIN_SAMPLE}-record bar, so cohorts are not "
+                          f"ranked against each other here."))
+
+    # Per-aspect standouts, restricted to cells that survived the mention floor.
+    matrix = segment_aspect_net(df)
+    matrix = matrix.drop(index=UNCLASSIFIED, errors="ignore").dropna(how="all", axis=1)
+    for aspect in matrix.columns:
+        column = matrix[aspect].dropna()
+        if len(column) < 2:
+            continue
+        high, low = column.idxmax(), column.idxmin()
+        gap = column[high] - column[low]
+        if gap < rails.GAP_MARGIN:
+            continue
+        out.append((VIOLET,
+                    f"On <b>{aspect}</b>, {SEGMENT_LABELS.get(high, high).lower()} "
+                    f"travellers score {column[high]:+.0f} net versus "
+                    f"{column[low]:+.0f} for "
+                    f"{SEGMENT_LABELS.get(low, low).lower()} — {_a(gap)} "
+                    f"{gap:.0f}-point gap."))
+    return out[:7]
+
+
+# --------------------------------------------------------------------------- #
 # Regional comparison (across countries)
 # --------------------------------------------------------------------------- #
 def country_color_map(countries) -> dict:
@@ -283,6 +436,94 @@ def compare_aspect_net(df_all) -> pd.DataFrame:
     if not series:
         return pd.DataFrame(columns=ALL_ASPECTS)
     return pd.DataFrame(series).T.reindex(columns=ALL_ASPECTS)
+
+
+def aspect_profile(df_all) -> pd.DataFrame:
+    """Long frame of country x aspect: net sentiment, negative share, volume.
+
+    The unit of competitive benchmarking. `negative` is carried alongside `net`
+    because the two answer different questions — net says how an aspect is
+    regarded overall, negative share says how loud the complaints are, and a
+    destination can lose on one while winning the other.
+    """
+    columns = ["country", "aspect", "net", "positive", "negative", "total", "thin"]
+    if df_all.empty:
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for country, g in df_all.groupby("country"):
+        net = aspect_net(g)
+        for _, r in net.iterrows():
+            rows.append(dict(
+                country=country, aspect=r["aspect"], net=r["net"],
+                positive=r["positive"], negative=r["negative"],
+                total=int(r["total"]), thin=not rails.has_enough(r["total"]),
+            ))
+    return pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+
+
+def benchmark_gaps(profile: pd.DataFrame, benchmark: str) -> pd.DataFrame:
+    """Every rival's per-aspect gap against `benchmark`, widest deficit first.
+
+    Only pairs where BOTH sides clear the mention floor are returned — a gap
+    computed against three comments is noise wearing a number.
+    """
+    columns = ["aspect", "country", "net", "bench_net", "gap", "negative",
+               "bench_negative", "neg_ratio", "total", "bench_total"]
+    if profile.empty or benchmark not in set(profile["country"]):
+        return pd.DataFrame(columns=columns)
+    base = profile[(profile["country"] == benchmark) & (~profile["thin"])]
+    base = base.set_index("aspect")
+    rivals = profile[(profile["country"] != benchmark) & (~profile["thin"])]
+    rows = []
+    for _, r in rivals.iterrows():
+        if r["aspect"] not in base.index:
+            continue
+        b = base.loc[r["aspect"]]
+        # How much louder this country's complaints are, as a ratio. Guarded so a
+        # benchmark with zero negatives yields no ratio rather than infinity.
+        ratio = (r["negative"] / b["negative"]) if b["negative"] > 0 else None
+        rows.append(dict(
+            aspect=r["aspect"], country=r["country"], net=r["net"],
+            bench_net=b["net"], gap=r["net"] - b["net"], negative=r["negative"],
+            bench_negative=b["negative"], neg_ratio=ratio,
+            total=int(r["total"]), bench_total=int(b["total"]),
+        ))
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows).sort_values("gap").reset_index(drop=True)
+
+
+def benchmark_signals(gaps: pd.DataFrame, benchmark: str) -> list:
+    """Auto-written head-to-head findings: [(color, text), ...]."""
+    out = []
+    if gaps.empty:
+        return out
+    material = gaps[gaps["gap"].abs() >= rails.GAP_MARGIN]
+    if material.empty:
+        return [(GREY, f"No aspect differs from <b>{benchmark}</b> by more than "
+                       f"{rails.GAP_MARGIN:.0f} net points — on the themes with "
+                       f"enough mentions to compare, these destinations read alike.")]
+
+    for _, r in material.head(3).iterrows():          # widest deficits
+        text = (f"<b>{r['country']}</b> trails {benchmark} on "
+                f"<b>{r['aspect']}</b>: {r['net']:+.0f} net vs "
+                f"{r['bench_net']:+.0f} — {_a(r['gap'])} "
+                f"{abs(r['gap']):.0f}-point deficit "
+                f"({int(r['total']):,} vs {int(r['bench_total']):,} mentions).")
+        if r["neg_ratio"] and r["neg_ratio"] > 1.15:
+            text += (f" Complaint share is "
+                     f"{100 * (r['neg_ratio'] - 1):.0f}% higher.")
+        out.append((RED, text))
+
+    for _, r in material.tail(2).iloc[::-1].iterrows():   # widest advantages
+        if r["gap"] <= 0:
+            continue
+        out.append((GREEN,
+                    f"<b>{r['country']}</b> beats {benchmark} on "
+                    f"<b>{r['aspect']}</b>: {r['net']:+.0f} net vs "
+                    f"{r['bench_net']:+.0f} (+{r['gap']:.0f} points, "
+                    f"{int(r['total']):,} vs {int(r['bench_total']):,} mentions)."))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1115,6 +1356,237 @@ def render_compare_table(metrics):
     )
 
 
+def render_segment_mix(metrics):
+    """Volume per segment — how much of the view each cohort actually is."""
+    st.markdown('<div class="sec-title">Who is talking</div>'
+                '<div class="sec-cap">Records per visitor segment. Unclassified '
+                'means the text carries no travel-style signal — it is the '
+                'expected majority, not a finding.</div>',
+                unsafe_allow_html=True)
+    m = metrics.iloc[::-1]
+    fig = go.Figure(go.Bar(
+        y=m["label"], x=m["mentions"], orientation="h",
+        marker_color=[SEGMENT_COLORS.get(s, TEAL) for s in m["segment"]],
+        marker_cornerradius=6,
+        text=[f"{v:,}" for v in m["mentions"]], textposition="outside",
+        textfont=dict(color=INK, size=12),
+        hovertemplate="%{y}<br>%{x:,} records<extra></extra>",
+    ))
+    style_fig(fig, height=max(220, 56 * len(m)))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_segment_perception(metrics):
+    """Perception per segment, with thin cohorts marked rather than ranked."""
+    st.markdown('<div class="sec-title">Perception by segment</div>'
+                f'<div class="sec-cap">0–100 per cohort. Segments under '
+                f'{rails.MIN_SAMPLE} records are marked ⚠ and should not be '
+                f'read as a ranking.</div>', unsafe_allow_html=True)
+    m = metrics.iloc[::-1]
+    labels = [f"{r.label} ⚠" if r.thin else r.label for r in m.itertuples()]
+    fig = go.Figure(go.Bar(
+        y=labels, x=m["perception"], orientation="h",
+        marker_color=[SEGMENT_COLORS.get(s, TEAL) for s in m["segment"]],
+        marker_cornerradius=6,
+        marker_pattern_shape=["/" if t else "" for t in m["thin"]],
+        text=[f"{v}" for v in m["perception"]], textposition="outside",
+        textfont=dict(color=INK, size=12),
+        customdata=m["mentions"],
+        hovertemplate="%{y}<br>perception: %{x}<br>%{customdata:,} records<extra></extra>",
+    ))
+    style_fig(fig, height=max(220, 56 * len(m)))
+    fig.update_xaxes(range=[0, 100])
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_segment_aspect_heatmap(df):
+    """Aspect x segment net sentiment — the "luxury rate hospitality X" view."""
+    st.markdown('<div class="sec-title">Net sentiment by aspect × segment</div>'
+                f'<div class="sec-cap">Green = loved, red = criticised. Cells '
+                f'with fewer than {rails.MIN_ASPECT_MENTIONS} mentions are left '
+                f'blank rather than shown as noise.</div>',
+                unsafe_allow_html=True)
+    mat = segment_aspect_net(df)
+    mat = mat.reindex(index=[s for s in SEGMENTS_ORDER if s in mat.index])
+    mat = mat.dropna(how="all", axis=1).dropna(how="all", axis=0)
+    if mat.empty:
+        st.info(f"No aspect/segment pair reaches {rails.MIN_ASPECT_MENTIONS} "
+                f"mentions in this view — widen the filters to compare cohorts.")
+        return
+    text = [[("" if pd.isna(v) else f"{v:+.0f}") for v in row] for row in mat.values]
+    fig = go.Figure(go.Heatmap(
+        z=mat.values, x=[a.capitalize() for a in mat.columns],
+        y=[SEGMENT_LABELS.get(s, s) for s in mat.index],
+        zmid=0, zmin=-100, zmax=100,
+        colorscale=[[0.0, RED], [0.5, "#F4F7F7"], [1.0, GREEN]],
+        text=text, texttemplate="%{text}", textfont=dict(size=12),
+        hovertemplate="%{y} — %{x}: %{z:+.0f}%%<extra></extra>",
+        xgap=3, ygap=3, colorbar=dict(title="net %", thickness=12),
+    ))
+    style_fig(fig, height=max(240, 74 * len(mat)))
+    fig.update_yaxes(showgrid=False)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_segment_table(metrics):
+    st.markdown('<div class="sec-title">Segment scoreboard</div>'
+                '<div class="sec-cap">⚠ marks a cohort too thin to rank.</div>',
+                unsafe_allow_html=True)
+    show = metrics.assign(
+        label=[f"{r.label} ⚠" if r.thin else r.label for r in metrics.itertuples()]
+    )[["label", "mentions", "perception", "net", "positive", "negative"]]
+    st.dataframe(
+        show, use_container_width=True, hide_index=True,
+        column_config={
+            "label": st.column_config.TextColumn("segment"),
+            "mentions": st.column_config.NumberColumn("records", format="%,d"),
+            "perception": st.column_config.ProgressColumn(
+                "perception", min_value=0, max_value=100, format="%d"),
+            "net": st.column_config.NumberColumn("net %", format="%+.0f"),
+            "positive": st.column_config.NumberColumn("pos %", format="%.0f"),
+            "negative": st.column_config.NumberColumn("neg %", format="%.0f"),
+        },
+    )
+
+
+def render_segments(df):
+    if df.empty:
+        st.info("No records for the current filters.")
+        return
+    metrics = segment_metrics(df)
+    signals = segment_signals(df, metrics)
+    if signals:
+        with st.container(border=True):
+            st.markdown('<div class="sec-title">Segment takeaways</div>'
+                        '<div class="sec-cap">Auto-generated; only cohorts and '
+                        'themes with enough mentions to be read are quoted.</div>',
+                        unsafe_allow_html=True)
+            items = "".join(
+                f'<li><span class="dot" style="background:{c}"></span><span>{t}</span></li>'
+                for c, t in signals)
+            st.markdown(f'<ul class="signal-list">{items}</ul>',
+                        unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2, gap="medium")
+    with c1:
+        with st.container(border=True):
+            render_segment_mix(metrics)
+    with c2:
+        with st.container(border=True):
+            render_segment_perception(metrics)
+    with st.container(border=True):
+        render_segment_aspect_heatmap(df)
+    with st.container(border=True):
+        render_segment_table(metrics)
+
+
+# --------------------------------------------------------------------------- #
+# Head-to-head competitive benchmarking
+# --------------------------------------------------------------------------- #
+def render_benchmark_bars(profile, picked, benchmark, cmap):
+    """Grouped bars: each aspect side by side across the chosen countries."""
+    st.markdown('<div class="sec-title">Aspect head-to-head</div>'
+                f'<div class="sec-cap">Net sentiment per aspect, one bar per '
+                f'country. Only aspects with at least '
+                f'{rails.MIN_ASPECT_MENTIONS} mentions for a country are '
+                f'plotted.</div>', unsafe_allow_html=True)
+    solid = profile[~profile["thin"]]
+    if solid.empty:
+        st.info(f"No aspect reaches {rails.MIN_ASPECT_MENTIONS} mentions for any "
+                f"of the selected countries.")
+        return
+    order = (solid.groupby("aspect")["net"].mean().sort_values().index.tolist())
+    fig = go.Figure()
+    for country in picked:
+        g = solid[solid["country"] == country].set_index("aspect").reindex(order)
+        fig.add_bar(
+            y=[a.capitalize() for a in order], x=g["net"], orientation="h",
+            name=f"{country} ★" if country == benchmark else country,
+            marker_color=cmap[country], marker_cornerradius=4,
+            customdata=g["total"].fillna(0),
+            hovertemplate=(country + " — %{y}<br>net: %{x:+.0f}%"
+                           "<br>%{customdata:,.0f} mentions<extra></extra>"),
+        )
+    fig.update_layout(barmode="group", bargap=0.35, bargroupgap=0.08)
+    style_fig(fig, height=max(300, 46 * len(order) * max(1, len(picked)) / 1.6))
+    fig.update_xaxes(ticksuffix="%", zeroline=True, zerolinecolor=BORDER,
+                     zerolinewidth=1)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_benchmark_gaps(gaps, benchmark):
+    """The gap table: how far each rival sits from the benchmark, per aspect."""
+    st.markdown(f'<div class="sec-title">Gap vs {benchmark}</div>'
+                f'<div class="sec-cap">Negative = worse than {benchmark}. Only '
+                f'pairs where BOTH sides clear '
+                f'{rails.MIN_ASPECT_MENTIONS} mentions are listed.</div>',
+                unsafe_allow_html=True)
+    if gaps.empty:
+        st.info(f"No aspect has enough mentions on both sides to compare against "
+                f"{benchmark} in this view.")
+        return
+    show = gaps.assign(
+        complaints=[(f"{100 * (r - 1):+.0f}%" if r else "—") for r in gaps["neg_ratio"]]
+    )[["country", "aspect", "net", "bench_net", "gap", "complaints", "total",
+       "bench_total"]]
+    st.dataframe(
+        show, use_container_width=True, hide_index=True,
+        column_config={
+            "country": st.column_config.TextColumn("country"),
+            "aspect": st.column_config.TextColumn("aspect"),
+            "net": st.column_config.NumberColumn("its net %", format="%+.0f"),
+            "bench_net": st.column_config.NumberColumn(
+                f"{benchmark} net %", format="%+.0f"),
+            "gap": st.column_config.NumberColumn("gap", format="%+.0f"),
+            "complaints": st.column_config.TextColumn(
+                "complaints vs bench",
+                help="Difference in negative share — +40% means complaint "
+                     "mentions are 40% more common than for the benchmark."),
+            "total": st.column_config.NumberColumn("its mentions", format="%,d"),
+            "bench_total": st.column_config.NumberColumn(
+                f"{benchmark} mentions", format="%,d"),
+        },
+    )
+
+
+def render_benchmark(df_all, picked, cmap):
+    """Pick a benchmark country, then read every rival against it."""
+    st.markdown('<div class="sec-title">Competitive benchmark</div>'
+                '<div class="sec-cap">Choose the destination to measure the '
+                'others against.</div>', unsafe_allow_html=True)
+    if len(picked) < 2:
+        st.info("Pick at least two countries above to run a head-to-head.")
+        return
+    counts = df_all["country"].value_counts()
+    default = max(picked, key=lambda c: counts.get(c, 0))
+    benchmark = st.selectbox(
+        "Benchmark against", picked, index=picked.index(default),
+        help="Every other selected country is scored relative to this one.")
+
+    profile = aspect_profile(df_all[df_all["country"].isin(picked)])
+    gaps = benchmark_gaps(profile, benchmark)
+
+    thin_countries = [c for c in picked if rails.is_thin(counts.get(c, 0))]
+    if thin_countries:
+        st.warning(
+            f"Thin data: {', '.join(thin_countries)} "
+            f"{'has' if len(thin_countries) == 1 else 'have'} under "
+            f"{rails.MIN_SAMPLE} records in this view. Comparisons involving "
+            f"{'it' if len(thin_countries) == 1 else 'them'} are indicative only.",
+            icon="⚠️")
+
+    signals = benchmark_signals(gaps, benchmark)
+    if signals:
+        items = "".join(
+            f'<li><span class="dot" style="background:{c}"></span><span>{t}</span></li>'
+            for c, t in signals)
+        st.markdown(f'<ul class="signal-list">{items}</ul>', unsafe_allow_html=True)
+
+    render_benchmark_bars(profile, picked, benchmark, cmap)
+    st.write("")
+    render_benchmark_gaps(gaps, benchmark)
+
+
 def render_compare(df_all, granularity):
     countries = sorted(df_all["country"].dropna().unique().tolist())
     if not countries:
@@ -1131,6 +1603,8 @@ def render_compare(df_all, granularity):
     cmap = country_color_map(countries)
     metrics = compare_metrics(sub)
 
+    with st.container(border=True):
+        render_benchmark(sub, picked, cmap)
     c1, c2 = st.columns(2, gap="medium")
     with c1:
         with st.container(border=True):
@@ -1160,7 +1634,7 @@ def report_filename(country, year_range) -> str:
 
 
 def render_report_export(filtered, *, country, year_range, granularity,
-                         aspects, sentiments, providers, kept_only):
+                         aspects, sentiments, providers, kept_only, segments):
     """Sidebar 'Generate report' button -> branded PDF of the CURRENT view.
 
     Building the PDF renders four charts, so it runs on an explicit click rather
@@ -1179,7 +1653,7 @@ def render_report_export(filtered, *, country, year_range, granularity,
 
     signature = (country, tuple(year_range), granularity, tuple(sorted(aspects)),
                  tuple(sorted(sentiments)), tuple(sorted(providers)), kept_only,
-                 len(filtered))
+                 tuple(sorted(segments)), len(filtered))
     if st.session_state.get("report_signature") != signature:
         st.session_state.pop("report_bytes", None)
 
@@ -1189,6 +1663,8 @@ def render_report_export(filtered, *, country, year_range, granularity,
         "Aspect (any of)": ", ".join(aspects) if aspects else "all aspects",
         "Sentiment": ", ".join(sentiments) if sentiments else "all",
         "Data source": ", ".join(providers) if providers else "all",
+        "Visitor segment": (", ".join(SEGMENT_LABELS.get(s, s) for s in segments)
+                            if segments else "all"),
         "Relevant records only": "yes" if kept_only else "no",
     }
 
@@ -1245,6 +1721,14 @@ def main():
     aspects = st.sidebar.multiselect("Aspect (any of)", aspect_opts)
     sentiments = st.sidebar.multiselect("Sentiment", SENTIMENTS, default=SENTIMENTS)
 
+    segment_opts = [s for s in SEGMENTS_ORDER if df["segment"].eq(s).any()]
+    segments = st.sidebar.multiselect(
+        "Visitor segment", segment_opts, default=segment_opts,
+        format_func=lambda s: SEGMENT_LABELS.get(s, s.capitalize()),
+        help="Traveller style inferred from the text. Most records carry no "
+             "style signal and land in Unclassified — deselect it to see only "
+             "the records that named one.")
+
     # Provider-level "Data source" filter: pick whole providers (YouTube,
     # Reviews, Reddit) and we expand them to their underlying sources.
     present_providers = [g for g in PROVIDER_GROUPS if df["provider"].eq(g).any()]
@@ -1260,13 +1744,14 @@ def main():
                                   help="relevance_kept = True. Turn off to include everything.")
 
     common = dict(country=country, aspects=aspects, sentiments=sentiments,
-                  sources=sources, kept_only=kept_only)
+                  sources=sources, kept_only=kept_only, segments=segments)
     filtered = filter_data(df, year_range=year_range, **common)
 
     # Same filters but across ALL countries — drives the regional comparison tab.
     filtered_all = filter_data(
         df, country="All", year_range=year_range, aspects=aspects,
         sentiments=sentiments, sources=sources, kept_only=kept_only,
+        segments=segments,
     )
 
     # Previous, equally-sized window immediately before the selected range.
@@ -1283,7 +1768,7 @@ def main():
     render_report_export(filtered, country=country, year_range=year_range,
                          granularity=granularity, aspects=aspects,
                          sentiments=sentiments, providers=providers,
-                         kept_only=kept_only)
+                         kept_only=kept_only, segments=segments)
 
     # ----- Header + metric cards -----
     render_header(filtered, cur_m, prev_m, country)
@@ -1310,7 +1795,7 @@ def main():
 
     # The Reviews tab only appears when the dataset actually has review records.
     has_reviews = df["source"].isin(REVIEW_SOURCES).any()
-    tab_names = ["Overview", "Compare", "Themes", "Voices"]
+    tab_names = ["Overview", "Compare", "Themes", "Segments", "Voices"]
     if has_reviews:
         tab_names.append("Reviews")
     tab_names.append("Data")
@@ -1342,6 +1827,9 @@ def main():
                 render_aspect_net(filtered)
         with st.container(border=True):
             render_aspect_explorer(filtered)
+
+    with tabs["Segments"]:
+        render_segments(filtered)
 
     with tabs["Voices"]:
         render_voices(filtered)

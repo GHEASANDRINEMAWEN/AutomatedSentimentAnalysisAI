@@ -28,7 +28,7 @@ try:
 except (AttributeError, ValueError):
     pass
 
-from core import aspects, emotion, geo, relevance, sentiment, store
+from core import aspects, emotion, geo, relevance, segments, sentiment, store
 
 PROVIDERS = {
     "youtube": "providers.youtube.adapter",
@@ -308,15 +308,61 @@ def print_table(records, limit: int = 20):
         print(row)
 
 
-def analyze(records):
-    """Run the full source-agnostic analysis layer over records (in place)."""
+def retag(records):
+    """Run every CHEAP analyzer (no model, seconds not hours) over records.
+
+    Relevance, country attribution, aspects, emotion and segment are all
+    rule-based, so they can be re-derived over the whole store whenever their
+    keyword lists change — without paying for a full sentiment rescore.
+    """
     relevance.mark(records)   # mark, don't drop — filtered rows stay for review
     geo.assign(records)       # re-home each record on the country it is ABOUT
+    aspects.tag(records)
+    emotion.tag(records)
+    segments.tag(records)     # which kind of traveller does this sound like?
+    return records
+
+
+def analyze(records):
+    """Run the full source-agnostic analysis layer over records (in place)."""
+    relevance.mark(records)
+    geo.assign(records)
     print("  scoring sentiment with transformer (first run downloads the model) ...")
     sentiment.score(records)
     aspects.tag(records)
     emotion.tag(records)
+    segments.tag(records)
     return records
+
+
+def print_segment_report(records):
+    """Visitor-segment distribution and per-segment sentiment over KEPT rows."""
+    from collections import defaultdict
+
+    keep = relevance.kept(records)
+    counts = defaultdict(int)
+    by_sentiment = defaultdict(lambda: defaultdict(int))
+    for rec in keep:
+        segment = rec.get("segment") or segments.UNCLASSIFIED
+        counts[segment] += 1
+        by_sentiment[segment][rec.get("sentiment_label") or "neutral"] += 1
+
+    total = len(keep) or 1
+    print()
+    print("=" * 72)
+    print(f"Visitor segments over {len(keep)} relevant records")
+    print("-" * 72)
+    print(f"  {'segment':<14} {'n':>6} {'share':>7}   {'pos':>5} {'neu':>5} {'neg':>5}")
+    order = sorted(counts, key=lambda s: (s == segments.UNCLASSIFIED, -counts[s]))
+    for segment in order:
+        n = counts[segment]
+        pct = lambda x: f"{(100 * x / n):4.0f}%" if n else "   0%"
+        pos = by_sentiment[segment].get("positive", 0)
+        neu = by_sentiment[segment].get("neutral", 0)
+        neg = by_sentiment[segment].get("negative", 0)
+        print(f"  {segment:<14} {n:>6} {100 * n / total:6.1f}%   "
+              f"{pct(pos)} {pct(neu)} {pct(neg)}")
+    print("=" * 72)
 
 
 def print_attribution_report(records):
@@ -362,7 +408,24 @@ def main():
         help="Skip fetching; re-derive country attribution over the whole store. "
              "Cheap (no model) — unlike --reprocess it does not re-score sentiment.",
     )
+    parser.add_argument(
+        "--retag", action="store_true",
+        help="Skip fetching; re-run every rule-based tagger (relevance, country, "
+             "aspects, emotion, segment) over the whole store. Cheap (no model).",
+    )
     args = parser.parse_args()
+
+    if args.retag:
+        records = store.read_all()
+        print(f"Re-tagging {len(records)} stored records (no sentiment rescore) ...")
+        retag(records)
+        store.rewrite(records)
+        rows = store.export_csv()
+        print_attribution_report(records)
+        print_aspect_report(records)
+        print_segment_report(records)
+        print(f"\nCSV updated: {store.CSV_FILE}  ({rows} rows total)")
+        return
 
     if args.reassign_countries:
         records = store.read_all()
@@ -407,6 +470,7 @@ def main():
         print_review_report(records, sample=5)
     print_attribution_report(records)
     print_aspect_report(records)
+    print_segment_report(records)
     print(f"\nCSV updated: {store.CSV_FILE}  ({rows} rows total)")
     # Aligned view of the KEPT (relevant) rows for quick eyeballing.
     print_table(relevance.kept(records), limit=20)

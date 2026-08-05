@@ -31,6 +31,7 @@ FIELDS = (
     "sentiment_score",
     "aspects",
     "emotion",
+    "segment",
     "relevance_kept",
 )
 
@@ -54,6 +55,7 @@ class Record:
     sentiment_score: Optional[float] = None
     aspects: str = ""                        # filled in later by core.aspects
     emotion: str = ""                        # filled in later by core.emotion
+    segment: str = ""                        # filled in later by core.segments
     relevance_kept: Optional[bool] = None    # filled in later by core.relevance
 
     def to_dict(self) -> dict:

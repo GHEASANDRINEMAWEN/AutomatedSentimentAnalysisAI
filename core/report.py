@@ -36,6 +36,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from core import rails
+
 # --------------------------------------------------------------------------- #
 # Brand tokens (mirrors the dashboard's design tokens)
 # --------------------------------------------------------------------------- #
@@ -63,17 +65,13 @@ SOURCE_LABELS = {
     "reddit": "Reddit posts",
 }
 
-# Aspects need a net-sentiment margin this wide before the narrative calls one
-# "praised" or "criticised" — below it the split is a coin-flip, not a finding.
-NET_MARGIN = 5.0
-# An aspect also needs this many mentions before it can headline a sentence.
-MIN_ASPECT_MENTIONS = 15
-# Perception must move at least this many points to count as a real trend.
-TREND_MARGIN = 2.0
-# Below this many records the view is too thin for theme or trend claims. The
-# report still renders — it says so plainly instead of dressing up noise as a
-# finding ("food is the most loved aspect, +100 net across 1 mention").
-MIN_SAMPLE = 50
+# Honesty rails live in core/rails.py so the dashboard and this report can never
+# disagree about what counts as enough evidence. Re-exported here because the
+# narrative code below reads better unqualified.
+NET_MARGIN = rails.NET_MARGIN
+MIN_ASPECT_MENTIONS = rails.MIN_ASPECT_MENTIONS
+TREND_MARGIN = rails.TREND_MARGIN
+MIN_SAMPLE = rails.MIN_SAMPLE
 
 
 # --------------------------------------------------------------------------- #
@@ -459,6 +457,33 @@ def narrative(df, *, country: str, granularity: str = "Year") -> list:
         bits.append(f"Beyond neutral, <b>{top.index[0]}</b> is the dominant "
                     f"emotional register, tagged on {_count(top.iloc[0])} "
                     f"({100 * top.iloc[0] / n:.0f}% of the total).")
+
+    # Visitor segments, when the view actually carries enough of them to compare.
+    if "segment" in df.columns:
+        cohorts = df.loc[df["segment"].ne("unclassified") & df["segment"].ne(""),
+                         "segment"]
+        if not cohorts.empty:
+            counts = cohorts.value_counts()
+            named = _join(f"{s} ({_count(c)})" for s, c in counts.head(3).items())
+            share = 100 * len(cohorts) / n
+            sentence = (f"{share:.0f}% of records name a travel style — most "
+                        f"often {named}.")
+            # Only mention the remainder when there IS one; a view filtered to a
+            # single segment is 100% classified and "the rest" would contradict.
+            if len(cohorts) < n:
+                sentence += (" The rest carry no style signal and are left "
+                             "unclassified.")
+            bits.append(sentence)
+            solid = [s for s, c in counts.items() if c >= MIN_SAMPLE]
+            if len(solid) >= 2:
+                scored = sorted(
+                    ((s, summarize(df[df["segment"] == s])["perception"])
+                     for s in solid), key=lambda kv: kv[1])
+                low, high = scored[0], scored[-1]
+                bits.append(f"Among cohorts large enough to compare, "
+                            f"<b>{high[0]}</b> travellers are the most positive "
+                            f"({high[1]}/100) and <b>{low[0]}</b> the most "
+                            f"critical ({low[1]}/100).")
     out.append(("Where the evidence comes from", " ".join(bits)))
     return out
 

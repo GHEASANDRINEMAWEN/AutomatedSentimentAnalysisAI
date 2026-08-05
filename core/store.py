@@ -30,6 +30,7 @@ CSV_COLUMNS = (
     "sentiment_score",
     "aspects",
     "emotion",
+    "segment",
     "relevance_kept",
     "engagement",
     "rating",
