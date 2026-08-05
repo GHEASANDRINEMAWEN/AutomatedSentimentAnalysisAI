@@ -172,8 +172,30 @@ python validate_report.py --all-countries
 python validate_report.py --country Kenya --aspects safety cost
 ```
 
+### Credentials — new developer setup
+Copy the template and fill in **your own** keys. `.env` is git-ignored:
+```bash
+cp .env.example .env
+```
+`.env.example` lists every key the pipeline can use, where to get it, and what
+it unlocks. Nothing is shared between developers, by design:
+
+| Key | Needed for | Quota | Free? |
+|---|---|---|---|
+| `YOUTUBE_API_KEY` | `--provider youtube` (main path) | ~10,000 units/day **per key** | yes |
+| `SERPAPI_KEY` | `--provider serpapi_reviews` | 250 searches/month **per account** | yes |
+| `REDDIT_CLIENT_ID` / `_SECRET` / `_USER_AGENT` | `--provider reddit` | generous | yes |
+
+**Every developer provisions their own key — do not share one.** Quota is
+per-key, and a full country sweep costs ~3,600 of YouTube's ~10,000 daily units.
+One shared key caps the whole team at 2–3 countries/day; four individual keys
+give 8–12. Sharing costs throughput and gives up per-developer revocation.
+
+Only the dashboard's deployment needs a shared secret, and it has none — it
+reads the committed `data/records.csv` and calls no API.
+
 ### YouTube
-Set your YouTube Data API v3 key as an environment variable (never commit it):
+Or set it in your shell instead of `.env` (never commit it):
 ```powershell
 setx YOUTUBE_API_KEY "your-api-key"
 ```
@@ -188,6 +210,8 @@ default, so plan on **two to three countries per day**.
 ```powershell
 setx SERPAPI_KEY "your-key"
 ```
+No review data has been collected yet — the place lists are configured for
+South Africa, Nigeria, Ghana and Zimbabwe, but no run has had a key available.
 Place lists per country live in `providers/serpapi_reviews/config.py`. The free
 tier is 250 searches/month and the adapter hard-caps each run at
 `MAX_API_CALLS_PER_RUN`. Without the key, `run.py --provider serpapi_reviews`

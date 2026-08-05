@@ -1,6 +1,7 @@
 # Full data-collection + analysis pipeline (run.py).
 # The dashboard alone only needs requirements.txt.
 praw
+python-dotenv  # lets config.py read credentials from a local .env file
 requests
 serpapi
 youtube-transcript-api
