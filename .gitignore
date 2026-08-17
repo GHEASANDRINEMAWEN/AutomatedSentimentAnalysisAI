@@ -11,7 +11,8 @@ __pycache__/
 !/data/sample_records.csv
 # ...and the full collected dataset as CSV (requested)
 !/data/records.csv
-# ...and one generated report, so the PDF export is viewable without running it
+# ...and two generated reports, so the PDF export is viewable without running it
 !/data/reports/
 /data/reports/*
 !/data/reports/sample-report.pdf
+!/data/reports/africa-insights-zimbabwe-2015-2026.pdf

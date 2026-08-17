@@ -1,17 +1,27 @@
-"""Branded PDF report for whatever the dashboard is currently showing.
+"""Intelligence-grade PDF report in the Africa INSIGHTS house style.
 
 `build_pdf(df, ...)` takes an ALREADY-FILTERED frame and returns PDF bytes, so
 the report always describes exactly the view on screen — same country, dates,
-aspects, sentiments and sources.
+aspects, sentiments, sources and segments.
 
-Two halves, both generated from the data (nothing is hard-coded):
+Three layers, and the separation between them is the point:
 
-  * charts    — sentiment breakdown, sentiment per aspect, trend over time and
-                volume, drawn with matplotlib in the brand palette.
-  * narrative — real sentences. `narrative()` computes the numbers and writes
-                paragraphs about the mix, which themes are praised or criticised,
-                which way the trend is moving, where the data came from and who
-                the loudest voices are.
+  * `core.facts`     computes every figure from the filtered records.
+  * `core.narrative` writes the analysis around those figures — Claude when a key
+                     is available, a deterministic template otherwise — and
+                     verifies that every number in the finished prose came from
+                     the fact pack.
+  * this module      lays the result out: title block, seven numbered sections,
+                     four charts, quoted voices, DATA NOTE callouts, methodology.
+
+No figure is computed here and none is computed by the model. If a number is on
+the page, `core.facts` derived it from the records.
+
+House style
+-----------
+Title block: country, period, and the research-team byline on near-black.
+Sections are numbered 01-07 with a gold rule. Body copy is analytical prose;
+DATA NOTE callouts mark every place the evidence is too thin to carry a claim.
 
 Deliberately free of Streamlit and of dashboard.py so it can be imported, run
 and tested from a plain script against data/records.csv.
@@ -20,7 +30,6 @@ and tested from a plain script against data/records.csv.
 from __future__ import annotations
 
 import io
-from datetime import datetime, timezone
 
 import matplotlib
 matplotlib.use("Agg")           # headless: no display needed on a server
@@ -36,125 +45,44 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from core import rails
+from core import facts, narrative as narrative_engine, rails
 
 # --------------------------------------------------------------------------- #
-# Brand tokens (mirrors the dashboard's design tokens)
+# Brand tokens
 # --------------------------------------------------------------------------- #
-TEAL = "#127B82"        # brand accent
-GREEN = "#2E9E5B"       # positive
-GREY = "#9AA7A8"        # neutral
-RED = "#D1495B"         # negative
-INK = "#1C2B2E"         # headings
-MUTED = "#5E7174"       # labels / captions
-BORDER = "#E6EBEB"
-FRAME = "#F5F7F8"
+INK = "#0D0D0D"          # title block, headings
+INK_SOFT = "#1A1A1A"     # body copy, secondary panels
+GOLD = "#FECF2F"         # accent: section rules, highlights, volume bars
+GOLD_LIGHT = "#FEE97A"   # accent, softened
+GREEN = "#6FCF97"        # positive
+RED = "#EB5757"          # negative
+GREY = "#6B6B6B"         # neutral, labels, captions
+CREAM = "#F5F5E8"        # section backgrounds and callouts
+WHITE = "#FFFFFF"
+HAIRLINE = "#E3E3D6"     # borders, drawn from the cream family
 
-SENTIMENTS = ("positive", "neutral", "negative")
+SENTIMENTS = facts.SENTIMENTS
 SENTIMENT_COLORS = {"positive": GREEN, "neutral": GREY, "negative": RED}
+ALL_ASPECTS = facts.ALL_ASPECTS
+SOURCE_LABELS = facts.SOURCE_LABELS
 
-ALL_ASPECTS = (
-    "food", "scenery", "safety", "wildlife", "hospitality", "transport", "cost",
-    "weather", "electricity", "water", "housing",
-)
-SOURCE_LABELS = {
-    "youtube": "YouTube comments",
-    "youtube_transcript": "YouTube transcript segments",
-    "google_hotels": "Google Hotels reviews",
-    "tripadvisor": "Tripadvisor reviews",
-    "reddit": "Reddit posts",
-}
+BYLINE = ("Prepared by Africa INSIGHTS Research Team &nbsp;|&nbsp; "
+          "Vertical: Travel &amp; Tourism")
 
-# Honesty rails live in core/rails.py so the dashboard and this report can never
-# disagree about what counts as enough evidence. Re-exported here because the
-# narrative code below reads better unqualified.
+# Honesty rails live in core/rails.py so the dashboard, the fact pack and this
+# report can never disagree about what counts as enough evidence.
 NET_MARGIN = rails.NET_MARGIN
 MIN_ASPECT_MENTIONS = rails.MIN_ASPECT_MENTIONS
 TREND_MARGIN = rails.TREND_MARGIN
 MIN_SAMPLE = rails.MIN_SAMPLE
 
-
-# --------------------------------------------------------------------------- #
-# Aggregation (plain pandas — no dashboard/Streamlit dependency)
-# --------------------------------------------------------------------------- #
-def summarize(df) -> dict:
-    """Headline metrics for a frame."""
-    n = len(df)
-    counts = df["sentiment_label"].value_counts().to_dict() if n else {}
-    split = {s: int(counts.get(s, 0)) for s in SENTIMENTS}
-    pct = {s: (100 * split[s] / n if n else 0.0) for s in SENTIMENTS}
-    perception = round((df["sentiment_score"].mean() + 1) / 2 * 100) if n else 0
-    return dict(n=n, split=split, pos=pct["positive"], neu=pct["neutral"],
-                neg=pct["negative"], net=pct["positive"] - pct["negative"],
-                perception=int(perception))
-
-
-def aspect_table(df) -> pd.DataFrame:
-    """Per-aspect mention count and positive/neutral/negative percentages."""
-    empty = pd.DataFrame(
-        columns=["aspect", "total", "positive", "neutral", "negative", "net"])
-    if df.empty:
-        return empty
-    exploded = df.assign(aspect=df["aspects"].str.split(",")).explode("aspect")
-    exploded = exploded[exploded["aspect"].isin(ALL_ASPECTS)]
-    if exploded.empty:
-        return empty
-    grouped = (exploded.groupby(["aspect", "sentiment_label"]).size()
-               .unstack(fill_value=0))
-    for s in SENTIMENTS:
-        if s not in grouped:
-            grouped[s] = 0
-    grouped["total"] = grouped[list(SENTIMENTS)].sum(axis=1)
-    out = grouped.reset_index()
-    for s in SENTIMENTS:
-        out[s] = 100 * out[s] / out["total"]
-    out["net"] = out["positive"] - out["negative"]
-    return out[["aspect", "total", *SENTIMENTS, "net"]].sort_values(
-        "net", ascending=False).reset_index(drop=True)
-
-
-def time_series(df, granularity: str = "Year") -> pd.DataFrame:
-    """Perception score and record volume per period."""
-    key = "year" if granularity == "Year" else "month"
-    if df.empty or key not in df.columns:
-        return pd.DataFrame(columns=["period", "perception", "volume", "neg_pct"])
-    grouped = (df.groupby(key)
-               .agg(avg=("sentiment_score", "mean"), volume=("source", "size"))
-               .reset_index().rename(columns={key: "period"}))
-    neg = (df["sentiment_label"].eq("negative").groupby(df[key]).mean() * 100)
-    grouped["neg_pct"] = grouped["period"].map(neg)
-    grouped["perception"] = (grouped["avg"] + 1) / 2 * 100
-    grouped["period"] = grouped["period"].astype(str)
-    return grouped.sort_values("period").reset_index(drop=True)
-
-
-def split_halves(df):
-    """Split the frame into earlier and later halves of its own date range.
-
-    Used to say whether a theme's criticism is rising or falling WITHIN the
-    selected window, without needing data from outside the user's filters.
-    """
-    if df.empty or "timestamp" not in df.columns:
-        return df.iloc[0:0], df.iloc[0:0]
-    ordered = df.sort_values("timestamp")
-    midpoint = len(ordered) // 2
-    if midpoint == 0:
-        return ordered.iloc[0:0], ordered
-    return ordered.iloc[:midpoint], ordered.iloc[midpoint:]
-
-
-def date_span(df):
-    """(earliest, latest) timestamps in the frame, or (None, None)."""
-    if df.empty or "timestamp" not in df.columns:
-        return None, None
-    stamps = df["timestamp"].dropna()
-    if stamps.empty:
-        return None, None
-    return stamps.min(), stamps.max()
-
-
-def _month_name(ts) -> str:
-    return ts.strftime("%B %Y") if ts is not None else "n/a"
+# Re-exported so existing callers (dashboard, validate_report) keep working
+# against the aggregation helpers they already import from here.
+summarize = facts.summarize
+aspect_table = facts.aspect_table
+time_series = facts.time_series
+split_halves = facts.split_halves
+date_span = facts.date_span
 
 
 # --------------------------------------------------------------------------- #
@@ -174,12 +102,12 @@ def _style_axes(ax, *, xgrid=False, ygrid=False):
     """Recessive axes: no box, hairline grid, muted tick labels."""
     for side in ("top", "right", "left", "bottom"):
         ax.spines[side].set_visible(False)
-    ax.tick_params(colors=MUTED, labelsize=8, length=0)
+    ax.tick_params(colors=GREY, labelsize=8, length=0)
     ax.set_axisbelow(True)
     if xgrid:
-        ax.xaxis.grid(True, color=BORDER, linewidth=0.8)
+        ax.xaxis.grid(True, color=HAIRLINE, linewidth=0.8)
     if ygrid:
-        ax.yaxis.grid(True, color=BORDER, linewidth=0.8)
+        ax.yaxis.grid(True, color=HAIRLINE, linewidth=0.8)
 
 
 def _png(fig) -> bytes:
@@ -189,25 +117,32 @@ def _png(fig) -> bytes:
     return buf.getvalue()
 
 
-def chart_sentiment_breakdown(metrics) -> bytes:
+def chart_sentiment_breakdown(sentiment: dict) -> bytes:
     """One 100%-stacked bar: the positive / neutral / negative mix.
 
-    Every segment is labelled with its own percentage, so the split is readable
-    without relying on the colour (green/red is the classic colour-blind trap).
+    Every segment carries its own percentage, so the split survives being read
+    in greyscale or by someone who cannot separate the green from the red.
     """
-    fig, ax = plt.subplots(figsize=(7.2, 1.5))
+    widths = {"positive": sentiment["positive_pct"],
+              "neutral": sentiment["neutral_pct"],
+              "negative": sentiment["negative_pct"]}
+    counts = {"positive": sentiment["positive_records"],
+              "neutral": sentiment["neutral_records"],
+              "negative": sentiment["negative_records"]}
+    fig, ax = plt.subplots(figsize=(7.2, 1.55))
     left = 0.0
     for label in SENTIMENTS:
-        width = getattr_pct(metrics, label)
+        width = widths[label] or 0.0
         if width <= 0:
             continue
-        ax.barh([0], [width], left=[left], height=0.5,
+        ax.barh([0], [width], left=[left], height=0.52,
                 color=SENTIMENT_COLORS[label], edgecolor="white", linewidth=1.5)
         if width >= 7:      # only label a segment wide enough to hold the text
             ax.text(left + width / 2, 0,
-                    f"{label}\n{width:.0f}%  ·  {metrics['split'][label]:,}",
-                    ha="center", va="center", color="white", fontsize=8.5,
-                    fontweight="bold", linespacing=1.4)
+                    f"{label}\n{width:.0f}%  ·  {counts[label]:,}",
+                    ha="center", va="center",
+                    color=INK if label != "neutral" else "white",
+                    fontsize=8.5, fontweight="bold", linespacing=1.4)
         left += width
     ax.set_xlim(0, 100)
     ax.set_ylim(-0.5, 0.5)
@@ -218,420 +153,437 @@ def chart_sentiment_breakdown(metrics) -> bytes:
     return _png(fig)
 
 
-def getattr_pct(metrics, label) -> float:
-    return {"positive": metrics["pos"], "neutral": metrics["neu"],
-            "negative": metrics["neg"]}[label]
+def chart_aspect_sentiment(aspects: list) -> bytes:
+    """100%-stacked bars per theme, best-regarded at the top.
 
-
-def chart_aspect_sentiment(table: pd.DataFrame) -> bytes:
-    """100%-stacked bars per aspect, best-regarded theme at the top."""
-    rows = table.head(11).iloc[::-1]          # barh draws bottom-up
+    Themes below the mention floor are drawn faded, so the reader can see the
+    whole picture without mistaking a three-comment theme for a finding.
+    """
+    rows = list(aspects)[:11][::-1]           # barh draws bottom-up
     height = max(2.0, 0.42 * len(rows) + 0.9)
     fig, ax = plt.subplots(figsize=(7.2, height))
     ypos = range(len(rows))
     left = [0.0] * len(rows)
     for label in SENTIMENTS:
-        widths = rows[label].tolist()
+        widths = [r[f"{label}_pct"] or 0.0 for r in rows]
         ax.barh(list(ypos), widths, left=left, height=0.6,
                 color=SENTIMENT_COLORS[label], edgecolor="white", linewidth=1.2,
-                label=label)
-        for i, (w, l) in enumerate(zip(widths, left)):
+                label=label,
+                alpha=1.0)
+        for i, (w, l, row) in enumerate(zip(widths, left, rows)):
             if w >= 12:
                 ax.text(l + w / 2, i, f"{w:.0f}%", ha="center", va="center",
-                        color="white", fontsize=7.5, fontweight="bold")
+                        color=INK if label != "neutral" else "white",
+                        fontsize=7.5, fontweight="bold",
+                        alpha=1.0 if row["reportable"] else 0.55)
         left = [a + b for a, b in zip(left, widths)]
+    # Fade the whole row for a theme that cannot headline a finding.
+    for i, row in enumerate(rows):
+        if not row["reportable"]:
+            ax.barh([i], [100], height=0.6, color="white", alpha=0.45, zorder=5)
     ax.set_yticks(list(ypos))
-    ax.set_yticklabels([f"{a.capitalize()}  ({int(t):,})"
-                        for a, t in zip(rows["aspect"], rows["total"])],
-                       fontsize=8.5, color=INK)
+    ax.set_yticklabels(
+        [f"{r['aspect'].capitalize()}  ({r['mentions']:,})"
+         + ("" if r["reportable"] else "  ·  thin")
+         for r in rows], fontsize=8.5, color=INK)
+    for tick, row in zip(ax.get_yticklabels(), rows):
+        if not row["reportable"]:
+            tick.set_color(GREY)
     ax.set_xlim(0, 100)
     ax.set_xticks([0, 25, 50, 75, 100])
     ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
     _style_axes(ax)
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.10 - 0.12 / height),
-              ncol=3, frameon=False, fontsize=8.5, labelcolor=MUTED,
+              ncol=3, frameon=False, fontsize=8.5, labelcolor=GREY,
               handlelength=1.2, handleheight=1.0, columnspacing=2.0)
     return _png(fig)
 
 
-def chart_trend(series: pd.DataFrame, granularity: str) -> bytes:
+def chart_trend(periods: list, granularity: str) -> bytes:
     """Perception score over time — one measure, one axis, one line."""
     fig, ax = plt.subplots(figsize=(7.2, 2.5))
-    x = list(range(len(series)))
-    ax.axhline(50, color=BORDER, linewidth=1.2, zorder=1)
+    x = list(range(len(periods)))
+    scores = [p["perception_score"] or 0 for p in periods]
+    labels = [p["period"] for p in periods]
+    ax.axhline(50, color=HAIRLINE, linewidth=1.2, zorder=1)
     ax.text(len(x) - 0.9 if x else 0, 50.8, "neutral (50)", fontsize=7,
-            color=MUTED, ha="right", va="bottom")
-    ax.plot(x, series["perception"], color=TEAL, linewidth=2.0, zorder=3)
-    ax.fill_between(x, 50, series["perception"], color=TEAL, alpha=0.10, zorder=2)
-    ax.scatter(x, series["perception"], s=26, color=TEAL, zorder=4,
-               edgecolor="white", linewidth=1.2)
+            color=GREY, ha="right", va="bottom")
+    ax.fill_between(x, 50, scores, color=GOLD, alpha=0.30, zorder=2)
+    ax.plot(x, scores, color=INK, linewidth=2.0, zorder=3)
+    ax.scatter(x, scores, s=30, color=GOLD, zorder=4, edgecolor=INK, linewidth=1.1)
     # Label only the endpoints, so the line stays readable.
     for i in ({0, len(x) - 1} if x else set()):
-        ax.annotate(f"{series['perception'].iloc[i]:.0f}", (i, series["perception"].iloc[i]),
-                    textcoords="offset points", xytext=(0, 10), ha="center",
-                    fontsize=8, color=INK, fontweight="bold")
+        ax.annotate(f"{scores[i]:.0f}", (i, scores[i]), textcoords="offset points",
+                    xytext=(0, 10), ha="center", fontsize=8, color=INK,
+                    fontweight="bold")
     ax.set_xticks(x)
-    ax.set_xticklabels(series["period"], rotation=45 if granularity == "Month" else 0,
-                       ha="right" if granularity == "Month" else "center")
-    ax.set_ylabel("perception score", fontsize=8, color=MUTED)
+    ax.set_xticklabels(labels, rotation=45 if granularity == "month" else 0,
+                       ha="right" if granularity == "month" else "center")
+    ax.set_ylabel("perception score", fontsize=8, color=GREY)
     _style_axes(ax, ygrid=True)
     return _png(fig)
 
 
-def chart_volume(series: pd.DataFrame, granularity: str) -> bytes:
+def chart_volume(periods: list, granularity: str) -> bytes:
     """Record volume per period — how much conversation each period carried."""
     fig, ax = plt.subplots(figsize=(7.2, 2.2))
-    x = list(range(len(series)))
-    ax.bar(x, series["volume"], width=0.62, color=TEAL, alpha=0.85)
+    x = list(range(len(periods)))
+    volumes = [p["records"] or 0 for p in periods]
+    labels = [p["period"] for p in periods]
+    ax.bar(x, volumes, width=0.62, color=GOLD, edgecolor=INK, linewidth=0.6)
     if x:
-        peak = int(series["volume"].idxmax())
-        ax.annotate(f"{int(series['volume'].iloc[peak]):,}",
-                    (peak, series["volume"].iloc[peak]),
+        peak = volumes.index(max(volumes))
+        ax.annotate(f"{volumes[peak]:,}", (peak, volumes[peak]),
                     textcoords="offset points", xytext=(0, 5), ha="center",
                     fontsize=8, color=INK, fontweight="bold")
     ax.set_xticks(x)
-    ax.set_xticklabels(series["period"], rotation=45 if granularity == "Month" else 0,
-                       ha="right" if granularity == "Month" else "center")
-    ax.set_ylabel("mentions", fontsize=8, color=MUTED)
+    ax.set_xticklabels(labels, rotation=45 if granularity == "month" else 0,
+                       ha="right" if granularity == "month" else "center")
+    ax.set_ylabel("mentions", fontsize=8, color=GREY)
     _style_axes(ax, ygrid=True)
     return _png(fig)
 
 
 # --------------------------------------------------------------------------- #
-# Narrative — real sentences, computed from the filtered data
+# Text safety
 # --------------------------------------------------------------------------- #
-def _join(items) -> str:
-    """'a', 'a and b', 'a, b and c'."""
-    items = list(items)
-    if not items:
-        return ""
-    if len(items) == 1:
-        return items[0]
-    return f'{", ".join(items[:-1])} and {items[-1]}'
+# Characters outside Latin-1 that reportlab's built-in fonts CAN draw, because
+# WinAnsiEncoding carries them. Keeping them means dashes and curly quotes
+# survive instead of being stripped out of otherwise clean prose.
+_WINANSI_EXTRA = set("–—‘’“”†‡•"
+                     "…‰‹›€™ŒœŠ"
+                     "šŸŽžƒˆ˜")
 
 
-def _count(value, noun: str = "mention") -> str:
-    """'1 mention' / '12 mentions' — never the '1 mentions' of naive f-strings."""
-    value = int(value)
-    return f"{value:,} {noun}{'' if value == 1 else 's'}"
+def _drawable(text: str) -> str:
+    """Drop characters the built-in fonts would render as black boxes."""
+    return "".join(ch for ch in text
+                   if ord(ch) < 256 or ch in _WINANSI_EXTRA)
 
 
-def _aspect_phrase(row) -> str:
-    return f"{row['aspect']} ({row['net']:+.0f} net across {_count(row['total'])})"
-
-
-def narrative(df, *, country: str, granularity: str = "Year") -> list:
-    """Write the findings as sentences. Returns a list of (heading, text)."""
-    metrics = summarize(df)
-    n = metrics["n"]
-    if not n:
-        return [("Summary", "No records match the current filters, so there is "
-                            "nothing to report. Widen the year range, sentiment "
-                            "or data-source filters and generate the report again.")]
-
-    lo, hi = date_span(df)
-    where = country if country and country != "All" else "the countries in view"
-    when = (f"between {_month_name(lo)} and {_month_name(hi)}"
-            if lo is not None and hi is not None else "across the dataset")
-    out = []
-
-    # --- 1. The headline mix -------------------------------------------------
-    tone = ("strongly positive" if metrics["net"] >= 40 else
-            "positive" if metrics["net"] >= 15 else
-            "mixed but net-positive" if metrics["net"] > 0 else
-            "mixed but net-negative" if metrics["net"] > -15 else "negative")
-    thin = n < MIN_SAMPLE
-    para = (f"Across {_count(n)} of {where} {when}, sentiment was "
-            f"{metrics['pos']:.0f}% positive, {metrics['neu']:.0f}% neutral and "
-            f"{metrics['neg']:.0f}% negative — a net sentiment of "
-            f"{metrics['net']:+.0f} points, which reads as {tone}. On the "
-            f"0–100 perception scale the period scores "
-            f"<b>{metrics['perception']}</b>.")
-    if thin:
-        para += (f" This is a thin view: {_count(n, 'record')} is below the "
-                 f"{MIN_SAMPLE}-record threshold this report uses for reliable "
-                 f"reading, so treat every figure below as indicative only.")
-    out.append(("What the data says", para))
-
-    # --- 2. What is praised, what is criticised ------------------------------
-    table = aspect_table(df)
-    solid = table[table["total"] >= MIN_ASPECT_MENTIONS]
-    if not table.empty:
-        busiest = table.sort_values("total", ascending=False).iloc[0]
-        bits = []
-        if solid.empty:
-            # Every theme is below the mention floor — say that, rather than
-            # promoting a one-off comment into a headline finding.
-            bits.append(
-                f"No theme reaches the {MIN_ASPECT_MENTIONS}-mention floor "
-                f"needed for a reliable read. The most-discussed is "
-                f"{busiest['aspect']}, raised in {_count(busiest['total'])} "
-                f"({busiest['positive']:.0f}% of them positive) — indicative, "
-                f"not conclusive.")
-        else:
-            loved = solid[solid["net"] >= NET_MARGIN].head(3)
-            disliked = solid[solid["net"] <= -NET_MARGIN].tail(3).iloc[::-1]
-            if not loved.empty:
-                bits.append("Visitors were most positive about "
-                            + _join(_aspect_phrase(r) for _, r in loved.iterrows())
-                            + ".")
-            if not disliked.empty:
-                bits.append("Criticism concentrated on "
-                            + _join(_aspect_phrase(r) for _, r in disliked.iterrows())
-                            + ".")
-            elif len(solid) > 1:
-                # Nothing clears the margin, but the reader still needs to know
-                # where the weakest reception is — hedged as the numbers demand.
-                weakest = solid.tail(2).iloc[::-1]
-                bits.append("No theme is decisively negative; the coolest "
-                            "reception went to "
-                            + _join(_aspect_phrase(r) for _, r in weakest.iterrows())
-                            + ".")
-            if loved.empty and disliked.empty:
-                bits.append("Overall no single theme stands out as clearly "
-                            "praised or clearly criticised — every aspect sits "
-                            "close to an even split.")
-            bits.append(f"{busiest['aspect'].capitalize()} was the most discussed "
-                        f"theme overall, raised in {_count(busiest['total'])} "
-                        f"({busiest['positive']:.0f}% of them positive).")
-        out.append(("Themes behind the score", " ".join(bits)))
-
-    # --- 3. Which way it is moving -------------------------------------------
-    series = time_series(df, granularity)
-    bits = []
-    if thin:
-        bits.append(f"With only {_count(n, 'record')} spread over "
-                    f"{_count(len(series), 'period')}, there is not enough "
-                    f"volume to read a direction; the trend chart is shown for "
-                    f"completeness. Collect more coverage before acting on it.")
-    elif len(series) >= 2:
-        first, last = series.iloc[0], series.iloc[-1]
-        delta = last["perception"] - first["perception"]
-        direction = ("improved" if delta >= TREND_MARGIN else
-                     "declined" if delta <= -TREND_MARGIN else "held steady")
-        bits.append(
-            f"Perception has {direction} over the period: it moved from "
-            f"{first['perception']:.0f} in {first['period']} to "
-            f"{last['perception']:.0f} in {last['period']} ({delta:+.0f} points).")
-        peak = series.loc[series["volume"].idxmax()]
-        bits.append(f"Conversation volume peaked in {peak['period']} with "
-                    f"{_count(peak['volume'])}, out of {n:,} in total.")
-    else:
-        bits.append(f"All {_count(n)} fall in a single period, so there is no "
-                    f"trend to read yet.")
-
-    # Rising / falling criticism per theme, comparing the two halves of the window.
-    earlier, later = split_halves(df)
-    if not thin and len(earlier) >= MIN_ASPECT_MENTIONS and len(later) >= MIN_ASPECT_MENTIONS:
-        before = aspect_table(earlier).set_index("aspect")
-        after = aspect_table(later).set_index("aspect")
-        shared = [a for a in after.index
-                  if a in before.index and after.loc[a, "total"] >= MIN_ASPECT_MENTIONS]
-        shifts = sorted(
-            ((a, after.loc[a, "negative"] - before.loc[a, "negative"]) for a in shared),
-            key=lambda kv: kv[1])
-        if shifts:
-            worst, worst_shift = shifts[-1]
-            best, best_shift = shifts[0]
-            if worst_shift >= NET_MARGIN:
-                bits.append(f"Negative sentiment around {worst} rose "
-                            f"{worst_shift:+.0f} points in the second half of the "
-                            f"period compared with the first.")
-            if best_shift <= -NET_MARGIN:
-                bits.append(f"Criticism of {best} eased over the same span "
-                            f"({best_shift:+.0f} points of negative share).")
-    out.append(("Direction of travel", " ".join(bits)))
-
-    # --- 4. Where the evidence comes from ------------------------------------
-    counts = df["source"].value_counts()
-    parts = [f"{int(c):,} {SOURCE_LABELS.get(s, s)}" for s, c in counts.items()]
-    bits = [f"The picture is drawn from {_join(parts)}."]
-    if "country_source" in df.columns:
-        content = int(df["country_source"].isin(["content", "context"]).sum())
-        bits.append(f"{100 * content / n:.0f}% of these records were attributed to "
-                    f"{where} from what the text itself is about, rather than from "
-                    f"the search query that surfaced them.")
-    emotive = df.loc[df["emotion"].ne("neutral") & df["emotion"].ne(""), "emotion"]
-    if not emotive.empty:
-        top = emotive.value_counts()
-        bits.append(f"Beyond neutral, <b>{top.index[0]}</b> is the dominant "
-                    f"emotional register, tagged on {_count(top.iloc[0])} "
-                    f"({100 * top.iloc[0] / n:.0f}% of the total).")
-
-    # Visitor segments, when the view actually carries enough of them to compare.
-    if "segment" in df.columns:
-        cohorts = df.loc[df["segment"].ne("unclassified") & df["segment"].ne(""),
-                         "segment"]
-        if not cohorts.empty:
-            counts = cohorts.value_counts()
-            named = _join(f"{s} ({_count(c)})" for s, c in counts.head(3).items())
-            share = 100 * len(cohorts) / n
-            sentence = (f"{share:.0f}% of records name a travel style — most "
-                        f"often {named}.")
-            # Only mention the remainder when there IS one; a view filtered to a
-            # single segment is 100% classified and "the rest" would contradict.
-            if len(cohorts) < n:
-                sentence += (" The rest carry no style signal and are left "
-                             "unclassified.")
-            bits.append(sentence)
-            solid = [s for s, c in counts.items() if c >= MIN_SAMPLE]
-            if len(solid) >= 2:
-                scored = sorted(
-                    ((s, summarize(df[df["segment"] == s])["perception"])
-                     for s in solid), key=lambda kv: kv[1])
-                low, high = scored[0], scored[-1]
-                bits.append(f"Among cohorts large enough to compare, "
-                            f"<b>{high[0]}</b> travellers are the most positive "
-                            f"({high[1]}/100) and <b>{low[0]}</b> the most "
-                            f"critical ({low[1]}/100).")
-    out.append(("Where the evidence comes from", " ".join(bits)))
-    return out
-
-
-def top_voices(df, limit: int = 3):
-    """Most-engaged positive and negative mentions: [(label, row), ...]."""
-    if df.empty:
-        return []
-    picks = []
-    for label in ("positive", "negative"):
-        rows = (df[df["sentiment_label"] == label]
-                .sort_values("engagement", ascending=False).head(limit))
-        picks.extend((label, row) for _, row in rows.iterrows())
-    return picks
-
-
-# --------------------------------------------------------------------------- #
-# PDF assembly
-# --------------------------------------------------------------------------- #
 def _safe(text: str, limit: int = 400) -> str:
-    """Make arbitrary comment text safe for reportlab's Latin-1 base fonts.
+    """Make arbitrary comment text safe to typeset.
 
-    Comments are full of emoji and non-Latin scripts, which the built-in
-    Helvetica cannot draw (they come out as black boxes). Drop what the font
-    cannot render, collapse whitespace, escape XML, and trim.
+    Comments are full of emoji and non-Latin scripts. Drop what the font cannot
+    draw, collapse whitespace, escape XML, and trim.
     """
     text = " ".join(str(text or "").split())
-    text = "".join(ch for ch in text if ch == "\n" or 32 <= ord(ch) < 256)
-    text = (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    text = _drawable(text)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
     return text or "(no renderable text)"
 
 
+def _rich(text: str) -> str:
+    """Escape narrative prose but keep <b> and <i> working.
+
+    The narrative may be model-written, so it is escaped like any other untrusted
+    string; the two tags the writing contract permits are then restored.
+    """
+    text = _drawable(str(text or ""))
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    for tag in ("b", "i"):
+        text = (text.replace(f"&lt;{tag}&gt;", f"<{tag}>")
+                    .replace(f"&lt;/{tag}&gt;", f"</{tag}>"))
+    return text
+
+
+# --------------------------------------------------------------------------- #
+# Styles
+# --------------------------------------------------------------------------- #
 def _styles():
     base = getSampleStyleSheet()
     return {
-        "title": ParagraphStyle("t", parent=base["Title"], fontName="Helvetica-Bold",
-                                fontSize=21, leading=25, textColor=colors.white,
-                                alignment=0, spaceAfter=2),
-        "subtitle": ParagraphStyle("st", parent=base["Normal"], fontSize=9.5,
-                                   leading=13.5, textColor=colors.HexColor("#CFE6E7")),
-        "h2": ParagraphStyle("h2", parent=base["Heading2"], fontName="Helvetica-Bold",
-                             fontSize=12.5, leading=16, textColor=colors.HexColor(TEAL),
-                             spaceBefore=12, spaceAfter=5),
-        "body": ParagraphStyle("b", parent=base["Normal"], fontSize=9.8, leading=15,
-                               textColor=colors.HexColor(INK), alignment=TA_JUSTIFY),
-        "caption": ParagraphStyle("c", parent=base["Normal"], fontSize=8.2, leading=11.5,
-                                  textColor=colors.HexColor(MUTED), spaceAfter=4),
-        "quote": ParagraphStyle("q", parent=base["Normal"], fontSize=9, leading=13,
-                                textColor=colors.HexColor(INK), leftIndent=6),
-        "meta": ParagraphStyle("m", parent=base["Normal"], fontSize=7.6, leading=10.5,
-                               textColor=colors.HexColor(MUTED)),
+        "country": ParagraphStyle(
+            "country", parent=base["Title"], fontName="Helvetica-Bold",
+            fontSize=34, leading=38, textColor=colors.white, alignment=0,
+            spaceAfter=0),
+        "period": ParagraphStyle(
+            "period", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=13, leading=18, textColor=colors.HexColor(GOLD),
+            spaceBefore=4),
+        "byline": ParagraphStyle(
+            "byline", parent=base["Normal"], fontSize=8.4, leading=12,
+            textColor=colors.HexColor("#BFBFB4")),
+        "headline": ParagraphStyle(
+            "headline", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=11.5, leading=16, textColor=colors.HexColor(INK)),
+        "secnum": ParagraphStyle(
+            "secnum", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=17, leading=19, textColor=colors.HexColor(GOLD)),
+        "sectitle": ParagraphStyle(
+            "sectitle", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=13, leading=19, textColor=colors.HexColor(INK)),
+        "body": ParagraphStyle(
+            "body", parent=base["Normal"], fontSize=9.8, leading=15.4,
+            textColor=colors.HexColor(INK_SOFT), alignment=TA_JUSTIFY,
+            spaceAfter=7),
+        "figtitle": ParagraphStyle(
+            "figtitle", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=9.4, leading=13, textColor=colors.HexColor(INK),
+            spaceBefore=6),
+        "caption": ParagraphStyle(
+            "caption", parent=base["Normal"], fontSize=8.2, leading=11.5,
+            textColor=colors.HexColor(GREY), spaceAfter=5),
+        "notelabel": ParagraphStyle(
+            "notelabel", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=7.2, leading=10, textColor=colors.HexColor(INK)),
+        "note": ParagraphStyle(
+            "note", parent=base["Normal"], fontSize=8.6, leading=12.4,
+            textColor=colors.HexColor(INK_SOFT)),
+        "quote": ParagraphStyle(
+            "quote", parent=base["Normal"], fontSize=8.8, leading=12.8,
+            textColor=colors.HexColor(INK_SOFT)),
+        "meta": ParagraphStyle(
+            "meta", parent=base["Normal"], fontSize=7.6, leading=10.8,
+            textColor=colors.HexColor(GREY)),
+        "th": ParagraphStyle(
+            "th", parent=base["Normal"], fontName="Helvetica-Bold", fontSize=7.6,
+            leading=10, textColor=colors.HexColor(INK)),
+        "td": ParagraphStyle(
+            "td", parent=base["Normal"], fontSize=8.2, leading=11,
+            textColor=colors.HexColor(INK_SOFT)),
     }
 
 
-def _header_band(title, subtitle, styles, width):
-    """Teal masthead carrying the country, date range and record count."""
-    inner = [[Paragraph(title, styles["title"])],
-             [Paragraph(subtitle, styles["subtitle"])]]
+# --------------------------------------------------------------------------- #
+# Building blocks
+# --------------------------------------------------------------------------- #
+def _title_block(pack: dict, styles, width):
+    """Near-black masthead: country, period, research-team byline."""
+    country = pack["meta"]["country"]
+    country = country if country and country != "All" else "All Markets"
+    inner = [
+        [Paragraph(_rich(country.upper()), styles["country"])],
+        [Paragraph(_rich(pack["meta"]["period_label"]).upper(), styles["period"])],
+        [Paragraph(BYLINE, styles["byline"])],
+    ]
     band = Table(inner, colWidths=[width])
     band.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(TEAL)),
-        ("LEFTPADDING", (0, 0), (-1, -1), 14),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
-        ("TOPPADDING", (0, 0), (0, 0), 13),
-        ("BOTTOMPADDING", (0, -1), (-1, -1), 13),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(INK)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 16),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+        ("TOPPADDING", (0, 0), (0, 0), 20),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 0),
+        ("TOPPADDING", (0, 1), (0, 1), 0),
+        ("BOTTOMPADDING", (0, 1), (0, 1), 10),
+        ("TOPPADDING", (0, 2), (0, 2), 8),
+        ("BOTTOMPADDING", (0, 2), (0, 2), 16),
+        ("LINEABOVE", (0, 2), (0, 2), 1.4, colors.HexColor(GOLD)),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
     return band
 
 
-def _metric_row(metrics, styles, width):
-    """Five at-a-glance tiles: volume, the sentiment mix, net and perception."""
-    cells = [
-        ("Records in view", f"{metrics['n']:,}", INK),
-        ("Positive", f"{metrics['pos']:.0f}%", GREEN),
-        ("Neutral", f"{metrics['neu']:.0f}%", MUTED),
-        ("Negative", f"{metrics['neg']:.0f}%", RED),
-        ("Perception", f"{metrics['perception']}/100", TEAL),
-    ]
-    label_style = ParagraphStyle("ml", fontName="Helvetica", fontSize=7.4,
-                                 leading=9, textColor=colors.HexColor(MUTED),
-                                 alignment=1)
-    row_labels, row_values = [], []
-    for label, value, color in cells:
-        row_labels.append(Paragraph(label.upper(), label_style))
-        row_values.append(Paragraph(
-            value, ParagraphStyle("mv", fontName="Helvetica-Bold", fontSize=16,
-                                  leading=19, textColor=colors.HexColor(color),
-                                  alignment=1)))
-    table = Table([row_values, row_labels], colWidths=[width / len(cells)] * len(cells))
+def _headline_bar(text, styles, width):
+    """The period's verdict, in a cream band under the masthead."""
+    table = Table([[Paragraph(_rich(text), styles["headline"])]], colWidths=[width])
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(FRAME)),
-        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(BORDER)),
-        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor(BORDER)),
-        ("TOPPADDING", (0, 0), (-1, 0), 10),
-        ("BOTTOMPADDING", (0, -1), (-1, -1), 9),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(CREAM)),
+        ("LINEBEFORE", (0, 0), (0, -1), 3, colors.HexColor(GOLD)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    return table
+
+
+def _metric_strip(pack: dict, styles, width):
+    """Five at-a-glance tiles: volume, the sentiment mix, net and perception."""
+    sent = pack["sentiment"]
+    cells = [
+        ("Records in view", f"{pack['volume']['records']:,}", INK),
+        ("Positive", f"{sent['positive_pct']:.0f}%", GREEN),
+        ("Neutral", f"{sent['neutral_pct']:.0f}%", GREY),
+        ("Negative", f"{sent['negative_pct']:.0f}%", RED),
+        ("Perception", f"{sent['perception_score']}/100", INK),
+    ]
+    label_style = ParagraphStyle("ml", fontName="Helvetica", fontSize=7.0,
+                                 leading=9, textColor=colors.HexColor(GREY),
+                                 alignment=1)
+    values, labels = [], []
+    for label, value, color in cells:
+        values.append(Paragraph(value, ParagraphStyle(
+            "mv", fontName="Helvetica-Bold", fontSize=17, leading=20,
+            textColor=colors.HexColor(color), alignment=1)))
+        labels.append(Paragraph(label.upper(), label_style))
+    table = Table([values, labels], colWidths=[width / len(cells)] * len(cells))
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(CREAM)),
+        ("LINEBELOW", (0, -1), (-1, -1), 2, colors.HexColor(GOLD)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor(HAIRLINE)),
+        ("TOPPADDING", (0, 0), (-1, 0), 11),
+        ("BOTTOMPADDING", (0, -1), (-1, -1), 10),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    return table
+
+
+def _section_head(number: str, title: str, styles, width):
+    """'01 — MONTH IN REVIEW' over a gold rule."""
+    row = [[Paragraph(number, styles["secnum"]),
+            Paragraph(_rich(title).upper(), styles["sectitle"])]]
+    table = Table(row, colWidths=[width * 0.09, width * 0.91])
+    table.setStyle(TableStyle([
+        ("LINEBELOW", (0, 0), (-1, -1), 1.6, colors.HexColor(GOLD)),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
+        ("LEFTPADDING", (1, 0), (1, 0), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+    ]))
+    return table
+
+
+def _data_note(text, styles, width):
+    """Cream callout with a gold spine: where the evidence runs out."""
+    rows = [[Paragraph("DATA NOTE", styles["notelabel"])],
+            [Paragraph(_rich(text), styles["note"])]]
+    table = Table(rows, colWidths=[width])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(CREAM)),
+        ("LINEBEFORE", (0, 0), (0, -1), 3, colors.HexColor(GOLD)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (0, 0), 7),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 1),
+        ("TOPPADDING", (0, 1), (0, 1), 0),
+        ("BOTTOMPADDING", (0, 1), (0, 1), 8),
     ]))
     return table
 
 
 def _image(png: bytes, width):
     """Scale a chart PNG to the frame width, preserving its aspect ratio."""
-    reader = io.BytesIO(png)
-    img = Image(reader)
+    img = Image(io.BytesIO(png))
     img.drawHeight = width * img.imageHeight / img.imageWidth
     img.drawWidth = width
     return img
 
 
-def _voice_block(picks, styles, width):
+def _figure(title, caption, png, styles, width):
+    """Title + caption + chart as one unbreakable block."""
+    return KeepTogether([Paragraph(_rich(title), styles["figtitle"]),
+                         Paragraph(_rich(caption), styles["caption"]),
+                         _image(png, width)])
+
+
+def _voice_cards(voices: dict, styles, width):
     """Quote cards for the most-engaged supportive and critical mentions."""
     rows = []
-    for label, r in picks:
+    for label in ("positive", "negative"):
         accent = GREEN if label == "positive" else RED
-        author = _safe(r.get("author") or "anonymous", 40)
-        when = ""
-        if pd.notna(r.get("timestamp")):
-            when = f" · {pd.Timestamp(r['timestamp']).strftime('%b %Y')}"
-        meta = (f'<font color="{accent}"><b>{label.upper()}</b></font> · '
-                f'{author}{when} · {int(r.get("engagement") or 0):,} likes · '
-                f'score {float(r.get("sentiment_score") or 0):+.2f}')
-        rows.append([Paragraph(
-            f'<font size="7.4" color="{MUTED}">{meta}</font><br/>'
-            f'“{_safe(r.get("text"), 300)}”', styles["quote"])])
+        for v in voices.get(label, [])[:2]:
+            meta = (f'<font color="{accent}"><b>{label.upper()}</b></font>'
+                    f'<font color="{GREY}"> &nbsp;·&nbsp; {_safe(v["author"], 40)}'
+                    f'{" · " + v["date"] if v["date"] else ""} &nbsp;·&nbsp; '
+                    f'{v["engagement"]:,} likes &nbsp;·&nbsp; '
+                    f'score {v["sentiment_score"]:+.2f}</font>')
+            rows.append([Paragraph(
+                f'<font size="7.2">{meta}</font><br/>'
+                f'“{_safe(v["text"], 300)}”', styles["quote"])])
+    if not rows:
+        return None
     table = Table(rows, colWidths=[width])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(CREAM)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor(HAIRLINE)),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(HAIRLINE)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return table
+
+
+def _peer_table(bench: dict, country: str, styles, width):
+    """Peer standings: every market in the reference set, subject highlighted."""
+    peers = [p for p in bench.get("peers", []) if p["reportable"]]
+    if len(peers) < 2:
+        return None
+    header = ["Market", "Records", "Perception", "Net sentiment"]
+    rows = [[Paragraph(h.upper(), styles["th"]) for h in header]]
+    subject_row = None
+    for i, p in enumerate(peers, start=1):
+        if p["is_subject"]:
+            subject_row = i
+        rows.append([
+            Paragraph(_rich(p["country"]), styles["td"]),
+            Paragraph(f"{p['records']:,}", styles["td"]),
+            Paragraph(f"{p['perception_score']}/100", styles["td"]),
+            Paragraph(f"{p['net_sentiment']:+.0f}", styles["td"]),
+        ])
+    table = Table(rows, colWidths=[width * 0.34, width * 0.20, width * 0.23,
+                                   width * 0.23])
     style = [
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(FRAME)),
-        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(BORDER)),
-        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor(BORDER)),
-        ("LEFTPADDING", (0, 0), (-1, -1), 9),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 9),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(CREAM)),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.HexColor(GOLD)),
+        ("INNERGRID", (0, 1), (-1, -1), 0.5, colors.HexColor(HAIRLINE)),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(HAIRLINE)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
+    if subject_row:
+        style += [
+            ("BACKGROUND", (0, subject_row), (-1, subject_row),
+             colors.HexColor(GOLD_LIGHT)),
+            ("LINEBEFORE", (0, subject_row), (0, subject_row), 3,
+             colors.HexColor(GOLD)),
+        ]
+    table.setStyle(TableStyle(style))
+    return table
+
+
+def _segment_table(segments: dict, styles, width):
+    """Cohort standings: share of view, perception and net per travel style."""
+    cohorts = segments.get("cohorts") or []
+    if not cohorts:
+        return None
+    header = ["Visitor segment", "Records", "Share of view", "Perception", "Net"]
+    rows = [[Paragraph(h.upper(), styles["th"]) for h in header]]
+    faded = []
+    for i, c in enumerate(cohorts, start=1):
+        if not c["reportable"]:
+            faded.append(i)
+        rows.append([
+            Paragraph(_rich(c["segment"].capitalize())
+                      + ("" if c["reportable"] else "  · thin"), styles["td"]),
+            Paragraph(f"{c['records']:,}", styles["td"]),
+            Paragraph(f"{c['share_of_view_pct']:.1f}%", styles["td"]),
+            Paragraph(f"{c['perception_score']}/100", styles["td"]),
+            Paragraph(f"{c['net_sentiment']:+.0f}", styles["td"]),
+        ])
+    table = Table(rows, colWidths=[width * 0.28, width * 0.16, width * 0.20,
+                                   width * 0.20, width * 0.16])
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(CREAM)),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.HexColor(GOLD)),
+        ("INNERGRID", (0, 1), (-1, -1), 0.5, colors.HexColor(HAIRLINE)),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(HAIRLINE)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]
+    for i in faded:
+        style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor(GREY)))
     table.setStyle(TableStyle(style))
     return table
 
 
 def _filters_table(filters, styles, width):
-    rows = [[Paragraph(f"<b>{k}</b>", styles["meta"]), Paragraph(str(v), styles["meta"])]
+    rows = [[Paragraph(f"<b>{_rich(k)}</b>", styles["meta"]),
+             Paragraph(_rich(str(v)), styles["meta"])]
             for k, v in filters.items()]
-    table = Table(rows, colWidths=[width * 0.28, width * 0.72])
+    table = Table(rows, colWidths=[width * 0.30, width * 0.70])
     table.setStyle(TableStyle([
-        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(BORDER)),
-        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor(BORDER)),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor(HAIRLINE)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor(HAIRLINE)),
         ("LEFTPADDING", (0, 0), (-1, -1), 7),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
@@ -641,18 +593,45 @@ def _filters_table(filters, styles, width):
 
 
 def _decorate(canvas, doc):
-    """Teal rule under the top margin and a muted footer with the page number."""
+    """Gold hairline over a near-black footer strip carrying the page number."""
     canvas.saveState()
-    canvas.setStrokeColor(colors.HexColor(BORDER))
-    canvas.setLineWidth(0.6)
-    canvas.line(doc.leftMargin, 14 * mm, doc.leftMargin + doc.width, 14 * mm)
-    canvas.setFont("Helvetica", 7.4)
-    canvas.setFillColor(colors.HexColor(MUTED))
-    canvas.drawString(doc.leftMargin, 10 * mm,
-                      "Africa Insights — Tourism Perception")
-    canvas.drawRightString(doc.leftMargin + doc.width, 10 * mm,
-                           f"Page {canvas.getPageNumber()}")
+    canvas.setFillColor(colors.HexColor(INK))
+    canvas.rect(0, 0, doc.pagesize[0], 12 * mm, stroke=0, fill=1)
+    canvas.setStrokeColor(colors.HexColor(GOLD))
+    canvas.setLineWidth(1.2)
+    canvas.line(0, 12 * mm, doc.pagesize[0], 12 * mm)
+    canvas.setFont("Helvetica-Bold", 7.2)
+    canvas.setFillColor(colors.HexColor(GOLD))
+    canvas.drawString(doc.leftMargin, 5 * mm, "AFRICA INSIGHTS")
+    canvas.setFont("Helvetica", 7.2)
+    canvas.setFillColor(colors.HexColor("#BFBFB4"))
+    canvas.drawString(doc.leftMargin + 33 * mm, 5 * mm,
+                      "Travel & Tourism · Perception Intelligence")
+    canvas.drawRightString(doc.leftMargin + doc.width, 5 * mm,
+                           f"{canvas.getPageNumber():02d}")
     canvas.restoreState()
+
+
+# --------------------------------------------------------------------------- #
+# Backwards-compatible narrative shim
+# --------------------------------------------------------------------------- #
+def narrative(df, *, country: str = "All", granularity: str = "Year",
+              benchmark_df=None) -> list:
+    """The report's sections as [(heading, text), ...].
+
+    Deterministic: this is the template narrative, with no model call, so it is
+    safe to use in tests and tooling that run without an API key. `build_pdf()`
+    uses the full engine in `core.narrative`, which prefers Claude.
+    """
+    pack = facts.build(df, country=country, granularity=granularity,
+                       benchmark_df=benchmark_df)
+    sections, _ = narrative_engine.template_sections(pack)
+    out = []
+    for sid, number, title, _brief in narrative_engine.SECTIONS:
+        body = sections.get(sid)
+        if body and body.get("prose"):
+            out.append((f"{number} — {title}", body["prose"].replace("\n\n", " ")))
+    return out
 
 
 def report_title(country: str) -> str:
@@ -660,114 +639,211 @@ def report_title(country: str) -> str:
     return f"{where} — Tourism Perception Report"
 
 
+# --------------------------------------------------------------------------- #
+# PDF assembly
+# --------------------------------------------------------------------------- #
 def build_pdf(df, *, country: str = "All", granularity: str = "Year",
-              filters: dict | None = None) -> bytes:
-    """Render the filtered frame as a branded PDF and return its bytes.
+              filters: dict | None = None, benchmark_df=None,
+              use_claude: bool = True, return_diagnostics: bool = False):
+    """Render the filtered frame as an intelligence-grade PDF.
 
     `df` must already have the dashboard's filters applied — the report describes
-    exactly what it is given. `filters` is echoed into the methodology appendix so
-    a reader can see which view produced the numbers.
+    exactly what it is given. `benchmark_df` is the same dataset with every
+    filter EXCEPT country applied; supplying it enables section 05's peer
+    comparison, and omitting it degrades that section to a DATA NOTE rather than
+    an error. `filters` is echoed into the methodology appendix.
+
+    Returns PDF bytes, or `(bytes, diagnostics)` when `return_diagnostics` is set
+    — the diagnostics carry which engine wrote the prose and what it logged, so a
+    caller can surface "written by Claude" vs "written from the template".
     """
-    metrics = summarize(df)
-    lo, hi = date_span(df)
-    span = (f"{_month_name(lo)} – {_month_name(hi)}"
-            if lo is not None else "no dated records")
-    generated = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    pack = facts.build(df, country=country, granularity=granularity,
+                       benchmark_df=benchmark_df, filters=filters)
+
+    if use_claude:
+        result = narrative_engine.write(pack)
+    else:
+        sections, headline = narrative_engine.template_sections(pack)
+        result = narrative_engine.NarrativeResult(
+            sections, headline, "template",
+            ["Narrative written from the built-in template (Claude disabled)."])
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4, title=report_title(country),
-        author="Africa Insights", subject="Tourism perception analysis",
-        leftMargin=16 * mm, rightMargin=16 * mm,
+        author="Africa INSIGHTS Research Team",
+        subject="Tourism perception intelligence",
+        leftMargin=17 * mm, rightMargin=17 * mm,
         topMargin=13 * mm, bottomMargin=20 * mm,
     )
     styles = _styles()
     width = doc.width
-    story = []
+    story = [_title_block(pack, styles, width), Spacer(1, 9)]
 
-    story.append(_header_band(
-        report_title(country),
-        f"{span} &nbsp;·&nbsp; {metrics['n']:,} records in view "
-        f"&nbsp;·&nbsp; generated {generated}",
-        styles, width))
-    story.append(Spacer(1, 10))
-    story.append(_metric_row(metrics, styles, width))
-    story.append(Spacer(1, 6))
+    if result.headline:
+        story += [_headline_bar(result.headline, styles, width), Spacer(1, 9)]
 
-    # --- Narrative -----------------------------------------------------------
-    for heading, text in narrative(df, country=country, granularity=granularity):
-        story.append(Paragraph(heading, styles["h2"]))
-        story.append(Paragraph(text, styles["body"]))
-
-    if metrics["n"] == 0:
-        doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
-        return buf.getvalue()
-
-    # --- Charts --------------------------------------------------------------
-    table = aspect_table(df)
-    series = time_series(df, granularity)
-
-    def figure(heading, caption, png):
-        """Heading + caption + chart as one unbreakable block, so a heading can
-        never be stranded at the foot of a page without its chart."""
-        return KeepTogether([Paragraph(heading, styles["h2"]),
-                             Paragraph(caption, styles["caption"]),
-                             _image(png, width)])
-
-    story.append(figure(
-        "Sentiment breakdown",
-        f"How the {metrics['n']:,} records in view split across sentiment "
-        f"classes. Net sentiment is {metrics['net']:+.0f} points.",
-        chart_sentiment_breakdown(metrics)))
-
-    if not table.empty:
-        story.append(PageBreak())
-        story.append(figure(
-            "Sentiment per aspect",
-            "Each travel theme mentioned in the view, ranked by net sentiment "
-            "(most positively regarded first). Mention counts in brackets.",
-            chart_aspect_sentiment(table)))
-
-    if not series.empty:
-        # The aspect chart is tall enough that trend + volume never both fit
-        # under it; giving the time charts their own page beats leaving one of
-        # them alone on a mostly-blank page.
-        story.append(PageBreak())
-        story.append(figure(
-            f"Trend over time (by {granularity.lower()})",
-            "Perception score per period on a 0–100 scale, where 50 is neutral.",
-            chart_trend(series, granularity)))
-        story.append(figure(
-            f"Volume (by {granularity.lower()})",
-            "Number of records per period — how much of the conversation each "
-            "period carries. Read the trend above against this.",
-            chart_volume(series, granularity)))
-
-    # --- Voices --------------------------------------------------------------
-    picks = top_voices(df)
-    if picks:
-        story.append(PageBreak())
-        story.append(Paragraph("The loudest voices", styles["h2"]))
+    if not pack["volume"]["records"]:
         story.append(Paragraph(
-            "The most-engaged supportive and critical mentions in this view. "
-            "Emoji and non-Latin characters are stripped for print.",
-            styles["caption"]))
-        story.append(_voice_block(picks, styles, width))
+            "No records match the current filters, so there is nothing to "
+            "report. Widen the year range, sentiment or data-source filters and "
+            "generate the report again.", styles["body"]))
+        doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
+        return (buf.getvalue(), _diagnostics(pack, result)) if return_diagnostics \
+            else buf.getvalue()
+
+    story += [_metric_strip(pack, styles, width), Spacer(1, 4)]
+
+    # Charts and tables are attached to the section that argues from them, so a
+    # reader never has to hold a number in their head across a page turn.
+    granularity_key = pack["trend"]["granularity"]
+    attachments = {
+        "perception_overview": lambda: [
+            _figure("Figure 1 — Sentiment breakdown",
+                    f"How the {pack['volume']['records']:,} records in view split "
+                    f"across sentiment classes. Net sentiment is "
+                    f"{pack['sentiment']['net_sentiment']:+.0f} points.",
+                    chart_sentiment_breakdown(pack["sentiment"]), styles, width)],
+        "thematic_analysis": _thematic_attachments(pack, styles, width),
+        "visitor_segments": lambda: _optional(
+            _segment_table(pack["segments"], styles, width)),
+        "competitive_benchmarking": lambda: _optional(
+            _peer_table(pack["benchmark"], country, styles, width)),
+        "trends_signals": _trend_attachments(pack, granularity_key, styles, width),
+    }
+
+    for number, title, prose, notes in result.ordered():
+        head = [_section_head(number, title, styles, width), Spacer(1, 6)]
+        paragraphs = [Paragraph(_rich(p), styles["body"])
+                      for p in prose.split("\n\n") if p.strip()]
+        # Keep the heading with its first paragraph so a section title can never
+        # be stranded alone at the foot of a page.
+        if paragraphs:
+            story.append(KeepTogether(head + paragraphs[:1]))
+            story.extend(paragraphs[1:])
+        else:
+            story.extend(head)
+        for note in notes:
+            story += [Spacer(1, 2), _data_note(note, styles, width), Spacer(1, 6)]
+        maker = attachments.get(_slug_of(title))
+        if maker:
+            for element in maker():
+                story += [Spacer(1, 4), element]
+        story.append(Spacer(1, 12))
 
     # --- Methodology ---------------------------------------------------------
-    story.append(Paragraph("How this view was built", styles["h2"]))
+    story.append(_section_head("08", "Methodology & Provenance", styles, width))
+    story.append(Spacer(1, 8))
     active = dict(filters or {})
     active.setdefault("Country", country)
-    active.setdefault("Date range", span)
-    active.setdefault("Records", f"{metrics['n']:,}")
-    story.append(KeepTogether(_filters_table(active, styles, width)))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph(
-        "Sentiment is scored by a multilingual transformer; aspects and emotion "
-        "are rule-based taggers; each record is attributed to the country its "
-        "text is about rather than the search query that surfaced it. Every "
-        "number and sentence above is computed from the filtered records.",
-        styles["meta"]))
+    active.setdefault("Period", pack["meta"]["period_label"])
+    active.setdefault("Records", f"{pack['volume']['records']:,}")
+    active["Generated"] = pack["meta"]["generated_utc"]
+    active["Narrative"] = _engine_label(result.engine)
+    story.append(_filters_table(active, styles, width))
+    story.append(Spacer(1, 8))
+    prov = pack["provenance"]
+    lines = []
+    if prov["sources"]:
+        lines.append("Evidence base: " + ", ".join(
+            facts.source_phrase(s) for s in prov["sources"]) + ".")
+    if prov["content_attributed_pct"] is not None:
+        lines.append(f"{prov['content_attributed_pct']:.0f}% of records were "
+                     f"attributed to this market from what the text itself is "
+                     f"about rather than from the query that surfaced them.")
+    lines.append(
+        f"Sentiment is scored by a multilingual transformer; themes, emotion and "
+        f"visitor segment are rule-based taggers. Evidence thresholds: "
+        f"{MIN_SAMPLE} records for a reliable view, {MIN_ASPECT_MENTIONS} "
+        f"mentions before a theme can headline a finding, {NET_MARGIN:.0f} points "
+        f"before a theme counts as praised or criticised, "
+        f"{rails.GAP_MARGIN:.0f} points before a cross-country gap is stated.")
+    lines.append(
+        "Every figure in this report is computed from the filtered records by "
+        "the analysis pipeline. The written analysis interprets those figures; "
+        "each number it states is verified back against them before publication, "
+        "and any section that fails verification is replaced by the deterministic "
+        "summary.")
+    story.append(Paragraph(_rich(" ".join(lines)), styles["meta"]))
 
     doc.build(story, onFirstPage=_decorate, onLaterPages=_decorate)
-    return buf.getvalue()
+    pdf = buf.getvalue()
+    return (pdf, _diagnostics(pack, result)) if return_diagnostics else pdf
+
+
+def _optional(element):
+    return [element] if element is not None else []
+
+
+def _thematic_attachments(pack, styles, width):
+    def make():
+        out = []
+        # Voices first: they follow directly from the prose that quotes them, and
+        # being short they fill the tail of the page instead of leaving a gap
+        # that the full-height theme chart could never fit into.
+        cards = _voice_cards(pack["voices"], styles, width)
+        if cards is not None:
+            out.append(KeepTogether([
+                Paragraph("Voices behind the numbers", styles["figtitle"]),
+                Paragraph("The most-engaged supportive and critical mentions in "
+                          "this view. Emoji and non-Latin characters are stripped "
+                          "for print.", styles["caption"]),
+                cards]))
+        if pack["aspects"]:
+            out.append(_figure(
+                "Figure 2 — Sentiment by theme",
+                "Every travel theme mentioned in this view, ranked by net "
+                "sentiment. Mention counts in brackets; themes below the "
+                f"{MIN_ASPECT_MENTIONS}-mention floor are faded and marked thin.",
+                chart_aspect_sentiment(pack["aspects"]), styles, width))
+        return out
+    return make
+
+
+def _trend_attachments(pack, granularity, styles, width):
+    def make():
+        periods = pack["trend"]["periods"]
+        if not periods:
+            return []
+        return [
+            _figure(f"Figure 3 — Perception over time (by {granularity})",
+                    "Perception score per period on a 0–100 scale, where 50 "
+                    "is neutral.",
+                    chart_trend(periods, granularity), styles, width),
+            _figure(f"Figure 4 — Conversation volume (by {granularity})",
+                    "Records per period. Read the trend above against this: a "
+                    "swing on thin volume is noise.",
+                    chart_volume(periods, granularity), styles, width),
+        ]
+    return make
+
+
+def _slug_of(title: str) -> str:
+    """Map a section title back to its id (the attachment lookup key)."""
+    for sid, _num, name, _brief in narrative_engine.SECTIONS:
+        if name == title:
+            return sid
+    return title.lower().replace(" ", "_")
+
+
+def _engine_label(engine: str) -> str:
+    return {
+        "claude": f"Written by {narrative_engine.MODEL}; every figure verified "
+                  f"against the computed data.",
+        "claude+template": f"Written by {narrative_engine.MODEL}; sections that "
+                           f"failed figure verification were replaced by the "
+                           f"deterministic summary.",
+        "template": "Deterministic summary (no language model was available).",
+    }.get(engine, engine)
+
+
+def _diagnostics(pack: dict, result) -> dict:
+    return {
+        "engine": result.engine,
+        "log": list(result.log),
+        "headline": result.headline,
+        "sections": [sid for sid, *_ in narrative_engine.SECTIONS
+                     if result.sections.get(sid, {}).get("prose")],
+        "data_notes": pack["data_notes"],
+        "records": pack["volume"]["records"],
+    }

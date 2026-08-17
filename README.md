@@ -31,11 +31,14 @@ core/
   aspects.py        # tag(records): travel topics mentioned (rule-based, swappable)
   emotion.py        # tag(records): a single emotion cue (rule-based, swappable)
   store.py          # append/rewrite(records) to /data + CSV export, dedupe on source_id
-  report.py         # build_pdf(df): branded PDF — charts + written narrative
+  facts.py          # build(df): every figure the report is allowed to print
+  narrative.py      # write(pack): Claude writes the analysis; numbers verified
+  report.py         # build_pdf(df): intelligence-grade PDF — 7 sections + charts
 run.py              # fetch -> relevance -> geo -> sentiment -> aspects -> emotion -> store
                     #   --reprocess           re-analyzes the stored data in place
                     #   --reassign-countries  re-derives attribution only (no model)
 validate_report.py  # smoke-tests the PDF through the dashboard's own filters
+validate_narrative.py  # proves the writing engine's guarantees (stubbed, offline)
 config.py           # reads Reddit API credentials from environment variables
 data/               # raw pulls as JSONL + CSV (git-ignored, keeps .gitkeep)
 ```
@@ -194,27 +197,65 @@ where both sides clear the mention floor, and thin countries raise a banner.
 
 ### PDF report
 The sidebar's **Generate report** button renders the *current filtered view* —
-country, year range, aspect, sentiment and data source — as a branded PDF
-(`core/report.py`). It carries four charts (sentiment breakdown, sentiment per
-aspect, trend over time, volume) plus a written narrative whose sentences and
-numbers are computed from the filtered records, not templated:
+country, year range, aspect, sentiment, source and segment — as an
+intelligence-grade PDF in the Africa INSIGHTS house style: country and period on
+a near-black title block, then seven numbered sections.
 
-> *Across 1,094 mentions of Ghana between June 2015 and July 2026, sentiment was
-> 68% positive… Visitors were most positive about scenery (+82 net across 210
-> mentions)… Criticism concentrated on cost (-19 net across 16 mentions)…
-> Negative sentiment around hospitality rose +15 points in the second half of the
-> period.*
+| § | Section | What it argues |
+|---|---------|----------------|
+| 01 | Month in Review | The verdict and the one thing to act on |
+| 02 | Perception Overview | Score, net sentiment, breakdown *(Figure 1)* |
+| 03 | Thematic Analysis | What drives the positive and the negative, with quoted voices *(Figure 2)* |
+| 04 | Visitor Segments | How adventure / luxury / business / budget differ |
+| 05 | Competitive Benchmarking | Standing against peer markets, overall and per theme |
+| 06 | Trends & Signals | What is rising and falling *(Figures 3 & 4)* |
+| 07 | Recommendations | Prescriptive actions, each tied to the finding that triggers it |
 
-Thin views say so rather than dressing up noise: below 50 records the report
-flags itself as indicative, and no theme headlines a finding on fewer than 15
-mentions. `data/reports/sample-report.pdf` is a committed example.
+The report **prescribes rather than reports**: every finding implies an action —
+*"safety is the top risk and worsening in Victoria Falls mentions → prioritise
+visible security messaging"*, not *"safety sentiment is negative"*.
+
+#### How the numbers stay honest
+Three layers, and the separation is the point:
+
+1. **`core/facts.py` computes.** Every figure — sentiment mix, per-aspect net,
+   trend, segments, peer gaps, top voices, volumes — is derived from the filtered
+   records into a JSON fact pack.
+2. **`core/narrative.py` interprets.** The pack is handed to Claude
+   (`claude-sonnet-4-6`, key read from `ANTHROPIC_API_KEY` in the environment and
+   nowhere else) which writes the analysis *around* those figures. It is
+   instructed never to calculate: no derived percentage, no summed total, no
+   estimate. Where the analysis wants a figure the pack lacks, it writes a **DATA
+   NOTE** instead.
+3. **The code verifies.** Every numeral in the finished prose is checked back
+   against the pack. A section citing an unverifiable figure is sent back once
+   for repair; if it still fails, that section is replaced by the deterministic
+   summary. Nothing unverified reaches the page.
+
+**No key, no problem.** Without `ANTHROPIC_API_KEY` — or on a network failure, a
+bad response, or a rate limit — the report still generates: the same seven
+sections are written from the same fact pack by a deterministic template. The
+methodology page always states which engine wrote the analysis.
+
+Thin views say so rather than dressing up noise. The rails in `core/rails.py`
+gate every claim, and each gap they open surfaces as a DATA NOTE callout: below
+50 records the report flags itself indicative, no theme headlines a finding on
+fewer than 15 mentions, and no cross-country gap is stated under 10 points.
+
+`data/reports/africa-insights-zimbabwe-2015-2026.pdf` is a committed example.
 
 Generate reports from the command line (same code path as the button):
 ```bash
-python validate_report.py --country Ghana
+python validate_report.py --country Ghana         # deterministic, free
+python validate_report.py --country Zimbabwe --live   # writes with Claude
 python validate_report.py --all-countries
 python validate_report.py --country Kenya --aspects safety cost
 ```
+
+Every run asserts that no figure in the prose is one the pipeline did not
+compute. `python validate_narrative.py` tests the engine's guarantees —
+verification, the repair pass, per-section substitution and every fallback path
+— against a stubbed client, so it runs offline and costs nothing.
 
 ### Credentials — new developer setup
 Copy the template and fill in **your own** keys. `.env` is git-ignored:
@@ -302,6 +343,8 @@ range, how attribution was decided, the aspect breakdown, and sample rows.
 
 ## Status
 Eleven African markets are collected and scored (35.5k records), served by a
-filterable Streamlit dashboard with a one-click branded PDF report. Every record
-is attributed to the country its text is about, not the query that found it.
+filterable Streamlit dashboard with a one-click intelligence-grade PDF report:
+seven numbered sections written by Claude around figures the pipeline computes,
+with every published number verified back against them. Every record is
+attributed to the country its text is about, not the query that found it.
 Google Trends is the next signal.

@@ -4,9 +4,17 @@ Builds a report the same way the "Generate report" button does — dashboard
 load_data -> filter_data -> core.report.build_pdf — so a green run means the
 button works, not merely that the report module imports.
 
+By default the narrative comes from the deterministic template, so the run costs
+nothing and needs no credentials. Pass `--live` to exercise the real Claude path
+(requires ANTHROPIC_API_KEY); the check that every published figure is one the
+pipeline computed runs either way.
+
+For the engine's own guarantees — verification, repair, fallback — see
+validate_narrative.py, which tests them against a stubbed client.
+
 Usage:
     python validate_report.py                          # South Africa, all years
-    python validate_report.py --country Ghana
+    python validate_report.py --country Zimbabwe --live
     python validate_report.py --country Kenya --aspects safety cost --out k.pdf
     python validate_report.py --all-countries          # one report per country
 """
@@ -21,20 +29,23 @@ except (AttributeError, ValueError):
     pass
 
 import dashboard
-from core import report
+from core import facts, narrative, report
 
 OUT_DIR = Path(__file__).parent / "data" / "reports"
 
 
-def build(df, country, *, year_range, aspects, sentiments, kept_only, granularity):
+def build(df, country, *, year_range, aspects, sentiments, kept_only, granularity,
+          live=False):
     """Filter exactly as the dashboard does, then render the PDF."""
     sources = sorted(df["source"].dropna().unique().tolist())
-    filtered = dashboard.filter_data(
-        df, country=country, year_range=year_range, aspects=aspects,
-        sentiments=sentiments, sources=sources, kept_only=kept_only,
-    )
-    pdf = report.build_pdf(
+    common = dict(year_range=year_range, aspects=aspects, sentiments=sentiments,
+                  sources=sources, kept_only=kept_only)
+    filtered = dashboard.filter_data(df, country=country, **common)
+    # The same view across every country — drives competitive benchmarking.
+    benchmark = dashboard.filter_data(df, country="All", **common)
+    pdf, diagnostics = report.build_pdf(
         filtered, country=country, granularity=granularity,
+        benchmark_df=benchmark, use_claude=live, return_diagnostics=True,
         filters={
             "Country": country,
             "Year range": f"{year_range[0]}–{year_range[1]}",
@@ -44,11 +55,11 @@ def build(df, country, *, year_range, aspects, sentiments, kept_only, granularit
             "Relevant records only": "yes" if kept_only else "no",
         },
     )
-    return filtered, pdf
+    return filtered, benchmark, pdf, diagnostics
 
 
-def check(filtered, pdf, country) -> bool:
-    """Assert the report is non-empty and its numbers match the frame."""
+def check(filtered, benchmark, pdf, diagnostics, country, granularity) -> bool:
+    """Assert the PDF is real and that every figure in it was computed."""
     metrics = report.summarize(filtered)
     problems = []
     if len(pdf) < 5_000:
@@ -57,11 +68,29 @@ def check(filtered, pdf, country) -> bool:
         problems.append("output is not a PDF")
     if metrics["n"] != len(filtered):
         problems.append("record count disagrees with the frame")
-    paragraphs = report.narrative(filtered, country=country)
-    if len(paragraphs) < 2 and not filtered.empty:
-        problems.append("narrative did not generate")
-    if metrics["n"] and f"{metrics['n']:,}" not in paragraphs[0][1]:
-        problems.append("headline sentence is missing the record count")
+
+    sections = report.narrative(filtered, country=country, granularity=granularity)
+    if metrics["n"]:
+        if len(sections) != 7:
+            problems.append(f"expected 7 sections, got {len(sections)}")
+        if f"{metrics['n']:,}" not in sections[0][1]:
+            problems.append("the executive summary is missing the record count")
+
+        # The report's central claim: no number reaches the page that the
+        # pipeline did not compute. Re-derive the pack and re-check the prose.
+        pack = facts.build(filtered, country=country, granularity=granularity,
+                           benchmark_df=benchmark)
+        allowed = facts.allowed_numbers(pack)
+        for heading, text in sections:
+            bad = narrative.unverified(text, allowed)
+            if bad:
+                problems.append(
+                    f"{heading} cites uncomputed figures: "
+                    + ", ".join(f"{b:g}" for b in bad))
+        if diagnostics["engine"] == "claude+template":
+            print("    NOTE  some sections failed verification and fell back:")
+            for line in diagnostics["log"]:
+                print(f"          {line}")
     for problem in problems:
         print(f"    FAIL  {problem}")
     return not problems
@@ -77,6 +106,10 @@ def main():
     parser.add_argument("--granularity", default="Year", choices=["Year", "Month"])
     parser.add_argument("--include-filtered", action="store_true",
                         help="Include records that failed the relevance filter.")
+    parser.add_argument("--live", action="store_true",
+                        help="Write the narrative with Claude (needs "
+                             "ANTHROPIC_API_KEY). Default is the free, "
+                             "deterministic template.")
     parser.add_argument("--out", default=None, help="Output path (single country).")
     args = parser.parse_args()
 
@@ -90,10 +123,10 @@ def main():
     ok = True
 
     for country in countries:
-        filtered, pdf = build(
+        filtered, benchmark, pdf, diagnostics = build(
             df, country, year_range=tuple(args.years), aspects=args.aspects,
             sentiments=args.sentiments, kept_only=not args.include_filtered,
-            granularity=args.granularity,
+            granularity=args.granularity, live=args.live,
         )
         path = (Path(args.out) if args.out and len(countries) == 1
                 else OUT_DIR / dashboard.report_filename(country, tuple(args.years)))
@@ -102,12 +135,12 @@ def main():
         print(f"\n  {country:<16} {metrics['n']:>6,} records  "
               f"{metrics['pos']:>3.0f}% pos / {metrics['neg']:>3.0f}% neg  "
               f"perception {metrics['perception']:>3}  ->  {path.name} "
-              f"({len(pdf) / 1024:,.0f} KB)")
-        passed = check(filtered, pdf, country)
+              f"({len(pdf) / 1024:,.0f} KB, {diagnostics['engine']})")
+        passed = check(filtered, benchmark, pdf, diagnostics, country,
+                       args.granularity)
         ok = ok and passed
-        if passed and metrics["n"]:
-            headline = report.narrative(filtered, country=country)[0][1]
-            print(f"    {headline.replace('<b>', '').replace('</b>', '')}")
+        if passed and diagnostics.get("headline"):
+            print(f"    {diagnostics['headline']}")
 
     print("\n" + ("All reports generated and validated." if ok
                   else "Some reports FAILED validation."))

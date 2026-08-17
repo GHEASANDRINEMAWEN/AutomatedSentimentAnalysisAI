@@ -1634,13 +1634,19 @@ def report_filename(country, year_range) -> str:
 
 
 def render_report_export(filtered, *, country, year_range, granularity,
-                         aspects, sentiments, providers, kept_only, segments):
+                         aspects, sentiments, providers, kept_only, segments,
+                         benchmark=None):
     """Sidebar 'Generate report' button -> branded PDF of the CURRENT view.
 
-    Building the PDF renders four charts, so it runs on an explicit click rather
+    Building the PDF renders four charts and (when ANTHROPIC_API_KEY is set)
+    calls Claude to write the analysis, so it runs on an explicit click rather
     than on every rerun. The result is held in session state alongside the filter
     signature that produced it and dropped the moment the filters change, so the
     download can never hand back a PDF describing a different view.
+
+    `benchmark` is the same view across ALL countries; it drives the report's
+    competitive-benchmarking section. Omitting it degrades that section to a data
+    note rather than failing the build.
     """
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Report**")
@@ -1672,12 +1678,15 @@ def render_report_export(filtered, *, country, year_range, granularity,
     if st.sidebar.button("📄 Generate report", use_container_width=True,
                          type="primary", disabled=disabled,
                          help="Build a PDF of exactly this filtered view — "
-                              "charts plus a written summary."):
-        with st.spinner("Building the report …"):
+                              "charts plus a written intelligence analysis."):
+        with st.spinner("Analysing the view and writing the report …"):
             try:
-                st.session_state["report_bytes"] = report_pdf.build_pdf(
+                pdf, diagnostics = report_pdf.build_pdf(
                     filtered, country=country, granularity=granularity,
-                    filters=filters)
+                    filters=filters, benchmark_df=benchmark,
+                    return_diagnostics=True)
+                st.session_state["report_bytes"] = pdf
+                st.session_state["report_engine"] = diagnostics["engine"]
                 st.session_state["report_signature"] = signature
             except Exception as exc:                        # pragma: no cover
                 st.session_state.pop("report_bytes", None)
@@ -1691,8 +1700,19 @@ def render_report_export(filtered, *, country, year_range, granularity,
             "⬇️ Download PDF", data=data,
             file_name=report_filename(country, year_range),
             mime="application/pdf", use_container_width=True)
+        # Say which engine wrote the analysis. A reader deciding how much weight
+        # to give the prose deserves to know whether it was written by the model
+        # or by the deterministic summary that stands in when no key is set.
+        written_by = {
+            "claude": "analysis written by Claude, every figure verified",
+            "claude+template": ("analysis written by Claude; sections that failed "
+                                "figure verification fell back to the summary"),
+            "template": "deterministic summary (set ANTHROPIC_API_KEY for the "
+                        "full written analysis)",
+        }.get(st.session_state.get("report_engine", ""), "")
         st.sidebar.caption(f"Ready — {len(filtered):,} records, "
-                           f"{len(data) / 1024:,.0f} KB.")
+                           f"{len(data) / 1024:,.0f} KB."
+                           + (f" {written_by.capitalize()}." if written_by else ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -1768,7 +1788,8 @@ def main():
     render_report_export(filtered, country=country, year_range=year_range,
                          granularity=granularity, aspects=aspects,
                          sentiments=sentiments, providers=providers,
-                         kept_only=kept_only, segments=segments)
+                         kept_only=kept_only, segments=segments,
+                         benchmark=filtered_all)
 
     # ----- Header + metric cards -----
     render_header(filtered, cur_m, prev_m, country)

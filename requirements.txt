@@ -5,3 +5,6 @@ plotly
 pandas
 matplotlib    # charts drawn into the PDF report
 reportlab     # PDF assembly for the "Generate report" button
+anthropic     # Claude writes the report's analysis; optional at runtime —
+              # without ANTHROPIC_API_KEY the report falls back to a
+              # deterministic summary built from the same computed figures.
