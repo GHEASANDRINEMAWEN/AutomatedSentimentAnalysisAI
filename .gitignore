@@ -11,11 +11,12 @@ __pycache__/
 !/data/sample_records.csv
 # ...and the full collected dataset as CSV (requested)
 !/data/records.csv
-# ...and two generated reports, so the PDF export is viewable without running it
+# ...and every generated report, so the whole set is readable on GitHub without
+# running the pipeline or holding an API key. PDFs only — the folder still
+# ignores anything else that lands in it.
 !/data/reports/
 /data/reports/*
-!/data/reports/sample-report.pdf
-!/data/reports/africa-insights-zimbabwe-2015-2026.pdf
+!/data/reports/*.pdf
 
 # Claude Code session state (worktrees, local agent config)
 .claude/

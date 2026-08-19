@@ -243,7 +243,12 @@ gate every claim, and each gap they open surfaces as a DATA NOTE callout: below
 50 records the report flags itself indicative, no theme headlines a finding on
 fewer than 15 mentions, and no cross-country gap is stated under 10 points.
 
-`data/reports/africa-insights-zimbabwe-2015-2026.pdf` is a committed example.
+`data/reports/` holds a committed report for all eleven markets, readable on
+GitHub without running the pipeline or holding an API key. Zimbabwe, Egypt,
+Nigeria, Rwanda, South Africa and Tanzania show the full analysis on a healthy
+sample; Cameroon (16 records) and Morocco (52) are worth reading for the
+opposite reason — they show the rails refusing to manufacture confidence the
+evidence does not support.
 
 Generate reports from the command line (same code path as the button):
 ```bash
