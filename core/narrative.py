@@ -34,12 +34,33 @@ import re
 from core import facts, rails
 
 MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 16_000
+
+# A finished seven-section report measures ~4k output tokens, so this is roughly
+# three times the room it needs — enough that a long report is never truncated,
+# small enough that a runaway turn fails fast instead of burning the budget.
+MAX_TOKENS = 12_000
+
+# Thinking is deliberately OFF, and that is a measured decision rather than a
+# cost saving. Adaptive thinking spends the whole budget before writing: at
+# `effort: high` the turn consumed 16,000 of 16,000 tokens on reasoning and
+# stopped at the ceiling before it ever called the tool, so every report
+# silently fell back to the template — raising the ceiling only made the failure
+# slower. At `effort: low` a draft came back with `sections` as bare strings.
+# With thinking off the same prompt returns a well-formed report in ~2 minutes.
+#
+# Nothing is lost by it: this turn does not reason its way to an answer, it
+# interprets figures that `core.facts` has already computed, and the honesty
+# guarantee does not rest on the model's care in any case — `verify()` checks
+# every number against the pack afterwards and repairs or replaces what fails.
+THINKING = {"type": "disabled"}
 
 # A prose figure counts as verified when it lands within this much of a computed
 # one. Prose rounds ("62%" for 61.7) and the pack does not, so the tolerance has
 # to cover half a unit of rounding in either direction.
 ROUNDING_TOLERANCE = 0.51
+
+# Set once `_load_env_file()` has folded a local .env into os.environ.
+_ENV_FILE_LOADED = False
 
 # A figure stands on its own: "+50 points", "1,186", "68/100". Digits welded to
 # letters are an identifier, not a statistic — "@johnajah4752" is a username and
@@ -144,58 +165,75 @@ what to do about what they describe.
   numbers cannot. Attribute as: the author name and date given in the pack.
 - Never mention the fact pack, JSON, this prompt, or that you are a model. You \
   are the research team.
-- Put DATA NOTES in the section's `data_notes` array, never inline in the prose.
-  Write each as one or two full sentences.
+- Put DATA NOTES in that section's own `..._notes` argument, never inline in \
+  the prose. Write each as one or two full sentences.
 
-Call the `submit_report` tool exactly once with all seven sections."""
+Call the `submit_report` tool exactly once. It takes one argument per section, \
+each holding that section's prose — fill in all seven."""
 
 
-REPORT_TOOL = {
-    "name": "submit_report",
-    "description": (
-        "Submit the finished report. Provide all seven sections in order, each "
-        "as analytical prose, plus any data notes that belong to that section."),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "headline": {
-                "type": "string",
-                "description": (
-                    "One sentence, at most 140 characters, giving the period's "
-                    "verdict for the report cover. No numbers unless they are in "
-                    "the fact pack."),
-            },
-            "sections": {
-                "type": "array",
-                "description": "The seven sections, in order.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "enum": list(SECTION_IDS),
-                               "description": "Which section this is."},
-                        "prose": {
-                            "type": "string",
-                            "description": (
-                                "The section body: two to four paragraphs of "
-                                "analytical prose separated by blank lines. "
-                                "<b> is the only permitted tag."),
-                        },
-                        "data_notes": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": (
-                                "Caveats for this section: thin samples, "
-                                "unavailable figures, comparisons the evidence "
-                                "cannot support. Empty array if none apply."),
-                        },
-                    },
-                    "required": ["id", "prose", "data_notes"],
-                },
-            },
+def _report_tool() -> dict:
+    """The submit_report tool: one flat string property per section.
+
+    Deliberately flat. The obvious schema — `sections` as an array of
+    {id, prose, data_notes} objects — is what this started as, and it failed in
+    production: rather than emitting the array, the model would serialise all
+    seven sections into a single JSON *string*, hand-escaping as it went, and
+    hand-escaping is where it broke. One traveller quotation carrying ordinary
+    double quotes ("Zimbabwe has the most hard working ... people") closed the
+    string early and the whole payload became unparseable, costing the entire
+    report — with 15,767 characters of perfectly good analysis inside it.
+
+    A flat `{"month_in_review": "...", ...}` gives it nothing to serialise by
+    hand: each section is a plain string the model emits as real JSON, so the
+    API's own encoder escapes the quotes. The failure mode drops from "lose the
+    report" to, at worst, "lose one section's data notes".
+
+    `strict: true` is also deliberately absent — constrained decoding on this
+    tool made the model emit sections whose prose was the literal word
+    "placeholder" and stop early. `_as_sections()` defends the shape instead.
+    """
+    properties = {
+        "headline": {
+            "type": "string",
+            "description": (
+                "One sentence, at most 140 characters, giving the period's "
+                "verdict for the report cover. No numbers unless they are in "
+                "the fact pack."),
         },
-        "required": ["headline", "sections"],
-    },
-}
+    }
+    required = ["headline"]
+    for sid, number, title, brief in SECTIONS:
+        properties[sid] = {
+            "type": "string",
+            "description": (
+                f"Section {number} — {title}. {brief} Two to four paragraphs of "
+                f"analytical prose separated by blank lines. <b> is the only "
+                f"permitted tag."),
+        }
+        properties[f"{sid}__notes"] = {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                f"DATA NOTES for section {number}: thin samples, unavailable "
+                f"figures, comparisons the evidence cannot support. Omit or "
+                f"leave empty when none apply."),
+        }
+        required.append(sid)
+    return {
+        "name": "submit_report",
+        "description": (
+            "Submit the finished report. Provide all seven sections, each as "
+            "analytical prose, plus any data notes belonging to that section."),
+        "input_schema": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        },
+    }
+
+
+REPORT_TOOL = _report_tool()
 
 
 def _user_prompt(pack: dict) -> str:
@@ -614,14 +652,39 @@ class NarrativeResult:
         return out
 
 
+def _load_env_file() -> None:
+    """Fold a local, git-ignored `.env` into the environment, once.
+
+    The dashboard and the validators reach the writing engine without ever
+    importing the top-level `config` module, so before this the documented
+    "put your key in .env" route worked for the Reddit provider and silently
+    did nothing for the report — every run fell back to the template with a
+    key sitting in the file. Loading here fixes that at the one point that
+    needs it, and keeps `core/` importable on its own.
+
+    `override=False` is the point: a key exported in the shell (or injected by
+    a CI secret store) still wins over whatever the file says.
+    """
+    global _ENV_FILE_LOADED
+    if _ENV_FILE_LOADED:
+        return
+    _ENV_FILE_LOADED = True
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return                                  # optional dependency; env only
+    load_dotenv(override=False)
+
+
 def _client():
     """An Anthropic client, or None when the SDK or the key is missing.
 
     The key is read from the environment by the SDK itself. It is never passed
     in, never read from a config file and never written to source.
     """
+    _load_env_file()
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None, "ANTHROPIC_API_KEY is not set"
+        return None, "ANTHROPIC_API_KEY is not set (export it, or put it in .env)"
     try:
         import anthropic
     except ImportError as exc:
@@ -630,6 +693,25 @@ def _client():
         return anthropic.Anthropic(), ""
     except Exception as exc:                                # pragma: no cover
         return None, f"could not create the Anthropic client ({exc})"
+
+
+def _draft(client, model: str, messages: list):
+    """One drafting turn: reason over the pack, then submit the report.
+
+    Streamed rather than awaited in one piece. A report takes a couple of
+    minutes to generate, which is long enough that a non-streaming call is
+    holding an idle connection open and betting on nothing in the path between
+    here and the API timing it out first.
+    """
+    with client.messages.stream(
+        model=model,
+        max_tokens=MAX_TOKENS,
+        system=SYSTEM_PROMPT,
+        thinking=THINKING,
+        tools=[REPORT_TOOL],
+        messages=messages,
+    ) as stream:
+        return stream.get_final_message()
 
 
 def _extract(response) -> dict | None:
@@ -653,20 +735,66 @@ def _extract(response) -> dict | None:
         return None
 
 
+def _as_list(value) -> list:
+    """A list from a field that should be one, decoding a JSON string if needed.
+
+    The model intermittently hands back a nested array double-encoded — the
+    seven finished sections arrive as one JSON *string* rather than as a list,
+    with the prose fully written inside it. Read literally that is an empty
+    report, and the whole thing falls back to the template with nothing wrong
+    but the wrapper. Decode it instead of discarding good work.
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip().startswith("["):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return decoded if isinstance(decoded, list) else []
+    return []
+
+
+def _clean_section(prose, notes) -> dict:
+    paragraphs = [p.strip() for p in str(prose or "").split("\n\n")]
+    return {
+        "prose": "\n\n".join(p for p in paragraphs if p),
+        "data_notes": [str(n).strip() for n in _as_list(notes) if str(n).strip()],
+    }
+
+
 def _as_sections(payload: dict) -> tuple:
-    """Normalise the tool payload into {id: {prose, data_notes}} plus a headline."""
+    """Normalise the tool payload into {id: {prose, data_notes}} plus a headline.
+
+    Reads the flat shape the tool asks for, and still understands the older
+    nested `sections` array — `_extract()` salvages a JSON object out of plain
+    text when the model answers without calling the tool, and prose written in
+    the wrong shape is prose that was still written.
+    """
+    payload = payload or {}
     sections = {}
-    for item in (payload or {}).get("sections", []):
-        sid = item.get("id")
-        if sid not in SECTION_IDS:
+
+    for sid in SECTION_IDS:
+        prose = payload.get(sid)
+        if isinstance(prose, str) and prose.strip():
+            sections[sid] = _clean_section(prose, payload.get(f"{sid}__notes"))
+
+    for item in _as_list(payload.get("sections")):
+        # A section arriving as a bare string is skipped rather than raised on:
+        # one malformed entry costs its own section to the template, not the
+        # whole report. First writing of a section wins — a draft that repeats a
+        # section id makes the repeat the throwaway ("placeholder"), and letting
+        # it overwrite would swap good prose for filler that still verifies.
+        if not isinstance(item, dict):
             continue
-        paragraphs = [p.strip() for p in str(item.get("prose", "")).split("\n\n")]
-        sections[sid] = {
-            "prose": "\n\n".join(p for p in paragraphs if p),
-            "data_notes": [str(n).strip() for n in item.get("data_notes", [])
-                           if str(n).strip()],
-        }
-    return sections, str((payload or {}).get("headline", "")).strip()
+        sid = item.get("id")
+        if sid not in SECTION_IDS or sections.get(sid, {}).get("prose"):
+            continue
+        cleaned = _clean_section(item.get("prose"), item.get("data_notes"))
+        if cleaned["prose"]:
+            sections[sid] = cleaned
+
+    return sections, str(payload.get("headline", "")).strip()
 
 
 def _repair_prompt(problems: dict) -> str:
@@ -682,8 +810,8 @@ def _repair_prompt(problems: dict) -> str:
         "Rewrite the affected sections. For each figure above, either replace it "
         "with the pack figure it was meant to be, restate the point without a "
         "number, or drop the claim and add a DATA NOTE explaining that the "
-        "figure is not available. Do not recalculate anything. Return all seven "
-        "sections again by calling submit_report.")
+        "figure is not available. Do not recalculate anything. Call submit_report "
+        "again with all seven sections filled in.")
 
 
 def write(pack: dict, *, model: str = MODEL, max_repairs: int = 1) -> NarrativeResult:
@@ -711,18 +839,13 @@ def write(pack: dict, *, model: str = MODEL, max_repairs: int = 1) -> NarrativeR
 
     try:
         for attempt in range(max_repairs + 1):
-            response = client.messages.create(
-                model=model,
-                max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                thinking={"type": "adaptive"},
-                output_config={"effort": "high"},
-                tools=[REPORT_TOOL],
-                messages=messages,
-            )
+            response = _draft(client, model, messages)
             payload = _extract(response)
             if payload is None:
-                log.append(f"Attempt {attempt + 1}: no usable response from {model}.")
+                log.append(f"Attempt {attempt + 1}: no usable response from {model}"
+                           + (" — the turn hit the token ceiling before the report "
+                              "was submitted."
+                              if response.stop_reason == "max_tokens" else "."))
                 break
             sections, headline = _as_sections(payload)
             if not sections:
@@ -731,10 +854,20 @@ def write(pack: dict, *, model: str = MODEL, max_repairs: int = 1) -> NarrativeR
             problems = verify(sections, pack)
             failed = {k: v for k, v in problems.items() if v}
             if not failed:
+                # Say how many of the seven came back, not just how many passed:
+                # "all 3 sections passed" reads like success when four sections
+                # were never written and are about to become template copy.
+                missing = [SECTION_TITLES[s][0] for s in SECTION_IDS
+                           if s not in sections]
                 log.append(
-                    f"Narrative written by {model}; all {len(sections)} sections "
-                    f"passed number verification"
-                    + (f" after {attempt} repair pass." if attempt else "."))
+                    f"Narrative written by {model}; {len(sections)} of "
+                    f"{len(SECTION_IDS)} sections returned and all passed number "
+                    f"verification"
+                    + (f" after {attempt} repair pass" if attempt else "")
+                    + (f"; {model} did not return section(s) "
+                       f"{', '.join(missing)}" if missing else "")
+                    + (" — the turn hit the token ceiling"
+                       if response.stop_reason == "max_tokens" else "") + ".")
                 break
             if attempt == max_repairs:
                 log.append(

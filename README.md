@@ -222,8 +222,9 @@ Three layers, and the separation is the point:
    trend, segments, peer gaps, top voices, volumes — is derived from the filtered
    records into a JSON fact pack.
 2. **`core/narrative.py` interprets.** The pack is handed to Claude
-   (`claude-sonnet-4-6`, key read from `ANTHROPIC_API_KEY` in the environment and
-   nowhere else) which writes the analysis *around* those figures. It is
+   (`claude-sonnet-4-6`, key read from `ANTHROPIC_API_KEY` — exported in the
+   shell, or set in a git-ignored local `.env`, and nowhere else) which writes
+   the analysis *around* those figures. It is
    instructed never to calculate: no derived percentage, no summed total, no
    estimate. Where the analysis wants a figure the pack lacks, it writes a **DATA
    NOTE** instead.
@@ -335,6 +336,12 @@ range, how attribution was decided, the aspect breakdown, and sample rows.
 3. Optionally add a handful of hotels/attractions to `PLACES` in
    `providers/serpapi_reviews/config.py`.
 4. `python run.py --provider youtube --country "<Name>"`.
+
+Nothing in the reporting path needs touching. `core/facts.py`, `core/narrative.py`
+and `core/report.py` name no country: they describe whatever frame they are
+handed, and the new market appears in the dashboard's country list, in its own
+report, and in every other country's competitive benchmarking as soon as it has
+records. `python validate_report.py --country "<Name>" --live` renders it.
 
 ## Sources (in priority order)
 1. **Reddit** — via the official API using [PRAW](https://praw.readthedocs.io/).

@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 
 try:
@@ -56,18 +57,46 @@ class FakeResponse:
     def __init__(self, payload):
         self.content = [FakeBlock(type="tool_use", name="submit_report",
                                   id="toolu_fake", input=payload)]
+        self.stop_reason = "tool_use"
+
+
+class FakeStream:
+    """Stands in for the SDK's streaming context manager.
+
+    The engine streams its drafting turn, so the fake has to be a context
+    manager exposing `get_final_message()` — mimicking `messages.create` here
+    would let a real call-path change pass the suite untested.
+    """
+
+    def __init__(self, response):
+        self.response = response
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self.response
 
 
 class FakeMessages:
     def __init__(self, client):
         self.client = client
 
-    def create(self, **kwargs):
+    def _next(self, kwargs):
         self.client.calls.append(kwargs)
         if self.client.raises:
             raise RuntimeError("simulated API failure")
         index = min(len(self.client.calls) - 1, len(self.client.payloads) - 1)
         return FakeResponse(self.client.payloads[index])
+
+    def create(self, **kwargs):
+        return self._next(kwargs)
+
+    def stream(self, **kwargs):
+        return FakeStream(self._next(kwargs))
 
 
 class FakeClient:
@@ -81,6 +110,15 @@ class FakeClient:
 
 
 def payload(prose_by_id: dict, headline: str = "A test headline.") -> dict:
+    """The flat shape the submit_report tool asks for: one argument per section."""
+    out = {"headline": headline}
+    for sid in narrative.SECTION_IDS:
+        out[sid] = prose_by_id.get(sid, "Placeholder prose.")
+    return out
+
+
+def nested_payload(prose_by_id: dict, headline: str = "A test headline.") -> dict:
+    """The older `sections` array shape, still accepted on the salvage path."""
     return {
         "headline": headline,
         "sections": [{"id": sid, "prose": prose_by_id.get(sid, "Placeholder prose."),
@@ -173,6 +211,58 @@ def test_clean_model_draft(pack):
                 result.headline == "Model headline.", result.headline)
     ok &= check("all seven sections are returned", len(result.ordered()) == 7,
                 f"{len(result.ordered())} sections")
+    return ok
+
+
+def test_malformed_payload_shapes(pack):
+    """Draft shapes the model really produces, which are not the documented one.
+
+    Observed live against claude-sonnet-4-6, each on a normal `tool_use` turn
+    with the prose fully written: `sections` double-encoded as a JSON string,
+    a section repeated with a throwaway second copy, and a bare string where a
+    section object belongs. Each one used to cost the whole report.
+    """
+    n = pack["volume"]["records"]
+    good = {sid: f"This view rests on {n:,} records." for sid in narrative.SECTION_IDS}
+
+    # 1. The seven sections arrive as one JSON string rather than a list.
+    encoded = dict(nested_payload(good, "Encoded headline."))
+    encoded["sections"] = json.dumps(encoded["sections"])
+    client = FakeClient([encoded])
+    original = with_fake(client)
+    try:
+        result = narrative.write(pack)
+    finally:
+        narrative._client = original
+    ok = check("a double-encoded sections array is decoded, not discarded",
+               len(result.ordered()) == 7 and result.engine == "claude",
+               f"engine={result.engine}, {len(result.ordered())} sections")
+
+    # 2. A section is repeated, the second copy being filler.
+    duplicated = dict(nested_payload(good, "Duplicate headline."))
+    duplicated["sections"] = duplicated["sections"] + [
+        {"id": "thematic_analysis", "prose": "placeholder", "data_notes": []}]
+    client = FakeClient([duplicated])
+    original = with_fake(client)
+    try:
+        result = narrative.write(pack)
+    finally:
+        narrative._client = original
+    written = result.sections.get("thematic_analysis", {}).get("prose", "")
+    ok &= check("a repeated section keeps the first writing, not the filler",
+                "placeholder" not in written, written[:40])
+
+    # 3. A bare string where a section object belongs.
+    mixed = dict(nested_payload(good, "Mixed headline."))
+    mixed["sections"] = mixed["sections"] + ["just a string"]
+    client = FakeClient([mixed])
+    original = with_fake(client)
+    try:
+        result = narrative.write(pack)
+    finally:
+        narrative._client = original
+    ok &= check("a non-object section is skipped without raising",
+                len(result.ordered()) == 7, f"{len(result.ordered())} sections")
     return ok
 
 
@@ -282,14 +372,35 @@ def test_request_shape(pack):
     call = client.calls[0]
     ok = check("model is claude-sonnet-4-6", call["model"] == "claude-sonnet-4-6",
                call["model"])
-    ok &= check("adaptive thinking is requested",
-                call.get("thinking") == {"type": "adaptive"})
+    # Thinking is off by measurement, not by oversight: adaptive thinking spent
+    # the entire budget reasoning and stopped at the ceiling before calling the
+    # tool, so every report fell back to the template. Asserted here so the
+    # setting cannot drift back without someone re-reading why.
+    ok &= check("thinking is explicitly disabled",
+                call.get("thinking") == {"type": "disabled"})
     ok &= check("budget_tokens is not sent (removed on 4.6+)",
                 "budget_tokens" not in str(call.get("thinking")))
+    ok &= check("the output budget leaves room for a full report",
+                call["max_tokens"] >= 8_000, f"{call['max_tokens']:,}")
     ok &= check("no sampling parameters are sent",
                 not {"temperature", "top_p", "top_k"} & set(call))
     ok &= check("the submit_report tool is offered",
                 call["tools"][0]["name"] == "submit_report")
+    # Strict mode is deliberately NOT set: constrained decoding on this schema
+    # made the model emit "placeholder" sections and stop early. See the note on
+    # REPORT_TOOL before turning it back on.
+    ok &= check("the report tool is not schema-strict",
+                call["tools"][0].get("strict") is not True)
+    # Flat by design: a nested array of section objects invited the model to
+    # serialise it into one JSON string by hand, and its hand-escaping broke on
+    # the first traveller quotation containing a double quote.
+    schema = call["tools"][0]["input_schema"]["properties"]
+    ok &= check("the tool exposes one flat argument per section",
+                all(schema.get(sid, {}).get("type") == "string"
+                    for sid in narrative.SECTION_IDS),
+                f"{len(schema)} properties")
+    ok &= check("no nested sections array remains",
+                "sections" not in schema)
     ok &= check("no assistant prefill (400s on 4.6+)",
                 call["messages"][-1]["role"] == "user")
     ok &= check("the fact pack is in the prompt",
@@ -339,6 +450,7 @@ def main():
         ("Invented-figure detection", lambda: test_detection(pack)),
         ("Template self-consistency", lambda: test_template_self_consistency(pack)),
         ("Clean model draft", lambda: test_clean_model_draft(pack)),
+        ("Malformed draft shapes", lambda: test_malformed_payload_shapes(pack)),
         ("Repair pass", lambda: test_repair_then_publish(pack)),
         ("Unrepairable draft", lambda: test_unrepairable_falls_back(pack)),
         ("Partial substitution", lambda: test_partial_substitution(pack)),

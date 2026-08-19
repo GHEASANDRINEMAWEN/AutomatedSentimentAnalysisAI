@@ -87,8 +87,12 @@ def check(filtered, benchmark, pdf, diagnostics, country, granularity) -> bool:
                 problems.append(
                     f"{heading} cites uncomputed figures: "
                     + ", ".join(f"{b:g}" for b in bad))
-        if diagnostics["engine"] == "claude+template":
-            print("    NOTE  some sections failed verification and fell back:")
+        # Print the engine's log whenever Claude did not write the whole thing.
+        # A silent fall back to the template still produces a valid PDF and a
+        # green run, so without this a broken key, a truncated draft or a failed
+        # verification all look exactly like success.
+        if diagnostics["engine"] != "claude":
+            print(f"    NOTE  narrative engine: {diagnostics['engine']}")
             for line in diagnostics["log"]:
                 print(f"          {line}")
     for problem in problems:

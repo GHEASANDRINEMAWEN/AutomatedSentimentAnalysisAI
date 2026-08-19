@@ -16,3 +16,6 @@ __pycache__/
 /data/reports/*
 !/data/reports/sample-report.pdf
 !/data/reports/africa-insights-zimbabwe-2015-2026.pdf
+
+# Claude Code session state (worktrees, local agent config)
+.claude/
