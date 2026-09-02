@@ -69,27 +69,39 @@ _ENV_FILE_LOADED = False
 _NUMBER = re.compile(r"(?<![A-Za-z_@0-9.])[-+]?\d[\d,]*(?:\.\d+)?(?![A-Za-z_])")
 _TAG = re.compile(r"<[^>]+>")
 
+# A percentage as the model may write it, decimals and all. Only the digits
+# immediately before the sign are rewritten; "0.72 score" and "+50 points" are
+# not percentages and are left exactly as written.
+_PERCENT = re.compile(r"(\d+(?:\.\d+)?)%")
+
 
 # --------------------------------------------------------------------------- #
 # The seven sections
 # --------------------------------------------------------------------------- #
 SECTIONS = (
-    ("month_in_review", "01", "Month in Review",
+    # The title here is only the fallback: `section_titles()` retitles section
+    # 01 per report from the range the records actually cover. The id stays
+    # `month_in_review` because it is the tool's argument name — renaming it
+    # would change the schema the model writes against, for no reader's benefit.
+    ("month_in_review", "01", "Period in Review",
      "Executive summary. Open with the verdict, not the method: what happened to "
-     "perception this period, what drove it, and the single thing the reader "
-     "should act on. Three short paragraphs at most."),
+     "perception over the period in view, what drove it, and the single thing "
+     "the reader should act on. Three short paragraphs at most."),
     ("perception_overview", "02", "Perception Overview",
      "The scores. Perception on the 0-100 scale, net sentiment, and the "
      "positive/neutral/negative breakdown — interpreted, not merely restated. "
      "Say what the mix implies about the market's standing."),
     ("thematic_analysis", "03", "Thematic Analysis",
      "Theme by theme, what is driving the positive and what is driving the "
-     "negative. Quote the supplied voices where they carry an argument. Only "
-     "themes marked reportable may headline a finding."),
+     "negative. Every theme you headline must carry a real excerpt from "
+     "`theme_voices` — quote the words, name the author and date. Only themes "
+     "marked reportable may headline a finding."),
     ("visitor_segments", "04", "Visitor Segments",
      "How luxury, business, budget and adventure travellers differ in what they "
      "praise and criticise, and what that implies for targeting. Compare cohorts "
-     "only where both are marked reportable."),
+     "only where both are marked reportable. Say once, in your own words, that "
+     "these cohorts are inferred from the language of the comments rather than "
+     "declared by the visitor."),
     ("competitive_benchmarking", "05", "Competitive Benchmarking",
      "Where this country stands against its peers overall and theme by theme. "
      "State a gap only where it is marked reportable."),
@@ -104,6 +116,20 @@ SECTIONS = (
 
 SECTION_IDS = tuple(s[0] for s in SECTIONS)
 SECTION_TITLES = {s[0]: (s[1], s[2]) for s in SECTIONS}
+
+
+def section_titles(pack: dict | None = None) -> dict:
+    """Section id -> the title this particular report should print.
+
+    Only section 01 moves: "Month in Review" is true of a month of records and
+    false of eleven years of them, so the title comes from the pack's own date
+    span (`facts.review_label`). Everything else is fixed.
+    """
+    titles = {sid: title for sid, _num, title, _brief in SECTIONS}
+    label = ((pack or {}).get("meta") or {}).get("review_label")
+    if label:
+        titles["month_in_review"] = label
+    return titles
 
 
 SYSTEM_PROMPT = f"""\
@@ -146,6 +172,22 @@ before a cross-country gap is worth stating.
 - Do not hedge everything as insurance. Where the sample is sound, write with \
   conviction; the rails exist so that you can.
 
+## Percentages: one format, and always say what it is of
+
+The pack carries full precision; the report prints one rendering of it.
+
+- Write every percentage as a whole number with no decimal place: 68%, never \
+  68.4% and never 68.42%. Rounding a pack figure to its whole number is the \
+  one restatement that is always allowed.
+- Never print a bare percentage. Name its denominator in the same sentence: \
+  "68% of all records in view", "68% of the mentions of that theme", "68% of \
+  the records in that cohort". The pack's `meta.percentage_bases` says what \
+  each percentage is a share of; use it, and never swap one denominator for \
+  another. A theme's 68% positive is 68% of that theme's own mentions, not of \
+  the whole view.
+- Two percentages on different denominators are not comparable and must not \
+  be subtracted, added or ranked against one another.
+
 ## Stance: prescribe, do not report
 
 Reporting says "safety sentiment is negative". Prescribing says "safety is the \
@@ -161,8 +203,13 @@ what to do about what they describe.
 - Two to four paragraphs per section. Section 01 leads with the verdict.
 - Plain text only, except `<b>bold</b>` for a figure or finding worth the \
   reader's eye. No markdown, no other tags.
-- Quote supplied voices sparingly and only when the quote makes an argument the \
-  numbers cannot. Attribute as: the author name and date given in the pack.
+- Quote real comments. `theme_voices` holds the highest-engagement \
+  supportive and critical comment for each headline theme, and `voices` the \
+  loudest of the whole view. Every theme you headline in section 03 must \
+  carry a short verbatim excerpt from `theme_voices` for that theme — the \
+  words in quotation marks, attributed to the author name and date the pack \
+  gives. Excerpt it, do not reword it, and never quote a comment the pack \
+  does not carry.
 - Never mention the fact pack, JSON, this prompt, or that you are a model. You \
   are the research team.
 - Put DATA NOTES in that section's own `..._notes` argument, never inline in \
@@ -304,6 +351,23 @@ def _theme(row) -> str:
     return f"{row['aspect']} ({row['net']:+.0f} net across {_count(row['mentions'])})"
 
 
+def _quote(v: dict, limit: int = 190) -> str:
+    """One supplied comment as an attributed excerpt.
+
+    Trimmed to a sentence-ish length because a report quotes evidence, not
+    whole comments, and attributed in full — an unattributed quote is not
+    evidence. Numbers inside the excerpt verify because the pack carries the
+    comment text, so the writer is repeating us, not calculating.
+    """
+    text = " ".join(str(v.get("text") or "").split())
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:—-") + "…"
+    who = v.get("author") or "anonymous"
+    when = f", {v['date']}" if v.get("date") else ""
+    where = f", {v['source']}" if v.get("source") else ""
+    return f"“{text}” ({who}{when}{where})"
+
+
 def template_sections(pack: dict) -> tuple:
     """Write all seven sections from the pack deterministically.
 
@@ -344,9 +408,10 @@ def template_sections(pack: dict) -> tuple:
         f"Across {_count(n, 'record')} of {country} in {meta['period_label']}, "
         f"tourism perception scores <b>{sent['perception_score']} out of 100</b>, "
         f"on net sentiment of {sent['net_sentiment']:+.0f} points. The mix reads "
-        f"as {tone}: {sent['positive_pct']:.0f}% of mentions are positive, "
-        f"{sent['neutral_pct']:.0f}% neutral and {sent['negative_pct']:.0f}% "
-        f"negative."]
+        f"as {tone}: of all records in view, "
+        f"{facts.pct(sent['positive_pct'])} are positive, "
+        f"{facts.pct(sent['neutral_pct'])} neutral and "
+        f"{facts.pct(sent['negative_pct'])} negative."]
     if loved or disliked:
         drivers = []
         if loved:
@@ -374,14 +439,14 @@ def template_sections(pack: dict) -> tuple:
         f"{sent['positive_records']:,} positive, {sent['neutral_records']:,} "
         f"neutral and {sent['negative_records']:,} negative records, giving net "
         f"sentiment of {sent['net_sentiment']:+.0f} points "
-        f"({sent['positive_pct']:.0f}% positive against "
-        f"{sent['negative_pct']:.0f}% negative)."]
+        f"({facts.pct(sent['positive_pct'], 'all records in view')} positive "
+        f"against {facts.pct(sent['negative_pct'])} negative)."]
     prov = pack["provenance"]
     if prov["sources"]:
         paras.append(
             "The reading is drawn from "
             + _join(facts.source_phrase(s) for s in prov["sources"])
-            + (f". {prov['content_attributed_pct']:.0f}% of these were attributed "
+            + (f". {facts.pct(prov['content_attributed_pct'])} of these were attributed "
                f"to {country} from what the text is about rather than the query "
                f"that surfaced them."
                if prov["content_attributed_pct"] is not None else "."))
@@ -390,7 +455,7 @@ def template_sections(pack: dict) -> tuple:
         paras.append(
             f"Beyond neutral, <b>{top['emotion']}</b> is the dominant emotional "
             f"register, tagged on {_count(top['records'], 'record')} "
-            f"({top['share_pct']:.0f}% of the view). Messaging that answers that "
+            f"({facts.pct(top['share_pct'], 'all records in view')}). Messaging that answers that "
             f"register will land harder than messaging that ignores it.")
     out["perception_overview"] = {"prose": "\n\n".join(paras), "data_notes": []}
 
@@ -404,7 +469,8 @@ def template_sections(pack: dict) -> tuple:
             f"No theme reaches the {rails.MIN_ASPECT_MENTIONS}-mention floor "
             f"required to headline a finding. The most-discussed is "
             f"{busiest['aspect']}, raised in {_count(busiest['mentions'])}, "
-            f"{busiest['positive_pct']:.0f}% of them positive — indicative only.")
+            f"{facts.pct(busiest['positive_pct'], 'its own mentions')} positive "
+            f"— indicative only.")
     else:
         if loved:
             paras.append("Visitors are most positive about "
@@ -425,15 +491,33 @@ def template_sections(pack: dict) -> tuple:
         paras.append(
             f"{busiest['aspect'].capitalize()} is the most discussed theme "
             f"overall, raised in {_count(busiest['mentions'])} with "
-            f"{busiest['positive_pct']:.0f}% of them positive.")
+            f"{facts.pct(busiest['positive_pct'], 'its own mentions')} positive.")
+    # The words behind the aggregates. A theme reading "-18 net across 214
+    # mentions" is a measurement; the comment someone actually left is the
+    # evidence for it, and it is what a visitor searching the destination meets.
+    # Each headline theme is quoted on the side it leans, so the excerpt
+    # illustrates the finding rather than arguing with it.
+    nets = {a["aspect"]: a["net"] for a in pack["aspects"]}
+    quoted = 0
+    for row in pack.get("theme_voices") or []:
+        order = (("negative", "positive") if (nets.get(row["aspect"]) or 0) < 0
+                 else ("positive", "negative"))
+        side = next((l for l in order if row.get(l)), None)
+        if not side:
+            continue
+        v = row[side][0]
+        paras.append(
+            f"The most-engaged {side} comment on {row['aspect']} carries "
+            f"{v['engagement']:,} likes: {_quote(v)}")
+        quoted += 1
+        if quoted == 3:
+            break
     voices = pack["voices"]
-    if voices["negative"]:
+    if not quoted and voices["negative"]:
         v = voices["negative"][0]
         paras.append(
-            f"The most-engaged critical mention, from {v['author']} in "
-            f"{v['date']}, carries {v['engagement']:,} likes — a single comment "
-            f"with that reach shapes the impression of readers who never see the "
-            f"aggregate.")
+            f"The most-engaged critical mention in the view carries "
+            f"{v['engagement']:,} likes: {_quote(v)}")
     out["thematic_analysis"] = {"prose": "\n\n".join(paras), "data_notes": []}
 
     # --- 04 Visitor Segments -------------------------------------------------
@@ -446,7 +530,8 @@ def template_sections(pack: dict) -> tuple:
     else:
         cohorts = seg["cohorts"]
         paras = [
-            f"{seg['classified_pct']:.0f}% of records name a travel style — most "
+            f"{facts.pct(seg['classified_pct'], 'all records in view')} name a "
+            f"travel style — most "
             f"often " + _join(f"{c['segment']} ({_count(c['records'], 'record')})"
                               for c in cohorts[:3])
             + ". The remainder carry no style signal and are left unclassified "
@@ -466,6 +551,11 @@ def template_sections(pack: dict) -> tuple:
                 "No two cohorts clear the reliability threshold, so no cohort "
                 "comparison is made here. Widening segment coverage is the "
                 "prerequisite for segment-level targeting.")
+    # How the cohorts came to exist belongs in the section that uses them,
+    # not only in the appendix: a reader who takes 'luxury travellers' for a
+    # surveyed population will over-read every figure in this section.
+    paras.append(seg["method"])
+    notes.append(seg["limitations"])
     out["visitor_segments"] = {"prose": "\n\n".join(paras), "data_notes": notes}
 
     # --- 05 Competitive Benchmarking -----------------------------------------
@@ -636,19 +726,30 @@ def template_sections(pack: dict) -> tuple:
 class NarrativeResult:
     """The finished narrative plus an audit trail of how it was produced."""
 
-    def __init__(self, sections: dict, headline: str, engine: str, log: list):
+    def __init__(self, sections: dict, headline: str, engine: str, log: list,
+                 titles: dict | None = None):
         self.sections = sections        # id -> {"prose", "data_notes"}
         self.headline = headline
         self.engine = engine            # "claude" | "claude+template" | "template"
         self.log = log                  # human-readable provenance lines
+        # Titles are per-report, not per-build: section 01 is named after the
+        # span the records actually cover. Defaulting to the static SECTIONS
+        # titles keeps a caller that builds a result by hand working.
+        self.titles = titles or {sid: title for sid, _n, title, _b in SECTIONS}
 
     def ordered(self):
-        """[(number, title, prose, data_notes), ...] in report order."""
+        """[(id, number, title, prose, data_notes), ...] in report order.
+
+        The id rides along so the renderer can look up a section's charts and
+        tables by identity rather than by matching its printed title — the title
+        is no longer constant across reports.
+        """
         out = []
         for sid, number, title, _ in SECTIONS:
             body = self.sections.get(sid)
             if body and body.get("prose"):
-                out.append((number, title, body["prose"], body.get("data_notes", [])))
+                out.append((sid, number, self.titles.get(sid, title),
+                            body["prose"], body.get("data_notes", [])))
         return out
 
 
@@ -755,11 +856,30 @@ def _as_list(value) -> list:
     return []
 
 
+def house_percentages(text: str) -> str:
+    """Round every percentage in written prose to the house whole number.
+
+    The system prompt asks for whole numbers and the model largely complies,
+    but "6.2% of all records in view" still reached a finished report while
+    the table beside it printed "6%" — exactly the split precision the house
+    style exists to prevent. Rendering is not something to ask for politely:
+    it is applied here, by the same rule `facts.pct()` applies to every
+    computed figure, so a percentage cannot depend on the writer remembering.
+
+    Safe before verification: the pack's allowed set already carries every
+    figure's whole-number rendering, so rounding a cited figure keeps it
+    verifiable rather than turning it into an invented one.
+    """
+    return _PERCENT.sub(lambda m: facts.pct(float(m.group(1))), text or "")
+
+
 def _clean_section(prose, notes) -> dict:
-    paragraphs = [p.strip() for p in str(prose or "").split("\n\n")]
+    paragraphs = [house_percentages(p).strip()
+                  for p in str(prose or "").split("\n\n")]
     return {
         "prose": "\n\n".join(p for p in paragraphs if p),
-        "data_notes": [str(n).strip() for n in _as_list(notes) if str(n).strip()],
+        "data_notes": [house_percentages(str(n)).strip()
+                       for n in _as_list(notes) if str(n).strip()],
     }
 
 
@@ -823,16 +943,18 @@ def write(pack: dict, *, model: str = MODEL, max_repairs: int = 1) -> NarrativeR
     still be written.
     """
     template, template_headline = template_sections(pack)
+    titles = section_titles(pack)
     log = []
 
     if not pack["volume"]["records"]:
         return NarrativeResult(template, template_headline, "template",
-                               ["No records in view — nothing to narrate."])
+                               ["No records in view — nothing to narrate."],
+                               titles)
 
     client, why = _client()
     if client is None:
         log.append(f"Narrative written from the built-in template: {why}.")
-        return NarrativeResult(template, template_headline, "template", log)
+        return NarrativeResult(template, template_headline, "template", log, titles)
 
     messages = [{"role": "user", "content": _user_prompt(pack)}]
     sections, headline, problems = {}, "", {}
@@ -897,11 +1019,11 @@ def write(pack: dict, *, model: str = MODEL, max_repairs: int = 1) -> NarrativeR
     except Exception as exc:
         log.append(f"{model} call failed ({type(exc).__name__}: {exc}); "
                    f"fell back to the built-in template.")
-        return NarrativeResult(template, template_headline, "template", log)
+        return NarrativeResult(template, template_headline, "template", log, titles)
 
     if not sections:
         log.append("Fell back to the built-in template.")
-        return NarrativeResult(template, template_headline, "template", log)
+        return NarrativeResult(template, template_headline, "template", log, titles)
 
     # Splice: keep every verified section, substitute the template for the rest,
     # and fill any section the model simply did not return.
@@ -916,4 +1038,5 @@ def write(pack: dict, *, model: str = MODEL, max_repairs: int = 1) -> NarrativeR
     engine = "claude" if not substituted else "claude+template"
     if substituted:
         log.append("Template used for section(s): " + ", ".join(substituted) + ".")
-    return NarrativeResult(final, headline or template_headline, engine, log)
+    return NarrativeResult(final, headline or template_headline, engine, log,
+                           titles)

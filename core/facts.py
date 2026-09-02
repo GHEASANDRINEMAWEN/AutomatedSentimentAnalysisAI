@@ -66,6 +66,56 @@ def _int(value):
     return None if value is None else int(value)
 
 
+def pct(value, of: str = "") -> str:
+    """The house rendering of a percentage: a whole number, and what it is of.
+
+    Every percentage in the product — dashboard, prose, tables, chart labels —
+    goes through here, because the review found the same figure printed three
+    ways ("68%", "68.1%", "68.4% of view") in one report. The pack keeps full
+    precision; only the rendering is rounded, and it is rounded in exactly one
+    place so no two sections can disagree.
+
+    `of` names the denominator, which is the half of a percentage that reports
+    usually drop: "68%" is not a fact until you know 68% of what.
+    """
+    if value is None:
+        return "n/a"
+    value = float(value)
+    # A share that is real but under a point rounds to "0%", which reads as
+    # "none" for a cohort that demonstrably has records — the segment table
+    # printed a 6-record cohort as 0% of the view. Whole numbers stay the house
+    # rule; this is the one exception, and it is an exception for honesty.
+    body = "<1%" if 0 < value < 1 else f"{value:.0f}%"
+    return body + (f" of {of}" if of else "")
+
+
+# What each percentage in the pack is a share OF. Handed to the writer with the
+# pack so a percentage is never restated with the wrong denominator, and mirrored
+# by the captions in `core.report`.
+PCT_BASES = {
+    "sentiment.positive_pct / neutral_pct / negative_pct":
+        "all records in view",
+    "aspects[].positive_pct / neutral_pct / negative_pct":
+        "the mentions of that one theme",
+    "aspect_movement[].negative_pct_first_half / negative_pct_second_half":
+        "that theme's mentions within that half of the period",
+    "segments.classified_pct":
+        "all records in view",
+    "segments.cohorts[].share_of_view_pct":
+        "all records in view",
+    "segments.cohorts[].positive_pct / negative_pct":
+        "the records in that cohort",
+    "benchmark.peers[].positive_pct / negative_pct":
+        "that market's own records",
+    "trend.periods[].negative_pct":
+        "the records in that period",
+    "provenance.sources[].share_pct / emotions[].share_pct":
+        "all records in view",
+    "provenance.content_attributed_pct":
+        "all records in view",
+}
+
+
 def _month_name(ts) -> str:
     return ts.strftime("%B %Y") if ts is not None else "n/a"
 
@@ -93,6 +143,23 @@ def period_label(lo, hi) -> str:
     if (lo.year, lo.month) == (hi.year, hi.month):
         return _month_name(lo)
     return f"{_month_name(lo)} – {_month_name(hi)}"
+
+
+def review_label(lo, hi) -> str:
+    """The title of section 01, congruent with the range the records cover.
+
+    The house template called it "Month in Review" unconditionally, which read
+    as false the moment a report covered eleven years of comments — the first
+    thing a client notices, and it puts every other figure in doubt. The label
+    now widens with the data exactly as `period_label()` does.
+    """
+    if lo is None or hi is None:
+        return "Period in Review"
+    if (lo.year, lo.month) == (hi.year, hi.month):
+        return "Month in Review"
+    if lo.year == hi.year:
+        return f"{lo.year} in Review"
+    return f"{lo.year} to {hi.year} in Review"
 
 
 # --------------------------------------------------------------------------- #
@@ -226,14 +293,39 @@ def _aspect_movement(df) -> list:
     return sorted(out, key=lambda r: -(r["change_points"] or 0))
 
 
+# How the visitor cohorts come to exist, in the words the report prints. Kept
+# beside the figures it qualifies so the prose, the PDF callout and the
+# methodology appendix cannot drift into three different explanations.
+SEGMENT_METHOD = (
+    "Visitor segments are inferred from the language of each comment, not "
+    "declared by the visitor. Every record is scanned for a fixed keyword list "
+    "per travel style — adventure (safari, hiking, national park, trekking), "
+    "luxury (resort, spa, five-star, private guide), business (conference, "
+    "layover, coworking, work trip) and budget (hostel, backpacking, street "
+    "food, affordable) — and is tagged with whichever style it uses the most "
+    "distinct keywords of; ties break in a fixed order. A record that matches "
+    "nothing is left unclassified rather than assigned a style, which is why "
+    "the classified share is well short of every record in view.")
+
+SEGMENT_LIMITS = (
+    "Read the cohorts accordingly. They describe records that talk a certain "
+    "way, not a surveyed population: a visitor who never names their travel "
+    "style is invisible to the tagger, a luxury traveller complaining about a "
+    "hostel reads as budget, and the keyword lists are English-only, so "
+    "non-English comments are under-classified. Cohort figures are directional "
+    "evidence for targeting, not a measurement of who visits.")
+
+
 def _segment_facts(df, n: int) -> dict:
     if "segment" not in df.columns or not n:
         return {"available": False, "note": "No segment column in this dataset.",
+                "method": SEGMENT_METHOD, "limitations": SEGMENT_LIMITS,
                 "classified_pct": None, "cohorts": []}
     cohorts = df.loc[df["segment"].ne(UNCLASSIFIED) & df["segment"].ne(""), "segment"]
     if cohorts.empty:
         return {"available": False,
                 "note": "No record in this view carries a travel-style signal.",
+                "method": SEGMENT_METHOD, "limitations": SEGMENT_LIMITS,
                 "classified_pct": 0.0, "cohorts": []}
     rows = []
     for segment, count in cohorts.value_counts().items():
@@ -253,6 +345,8 @@ def _segment_facts(df, n: int) -> dict:
     return {
         "available": True,
         "note": "",
+        "method": SEGMENT_METHOD,
+        "limitations": SEGMENT_LIMITS,
         "classified_pct": _num(100 * len(cohorts) / n),
         "unclassified_records": _int(n - len(cohorts)),
         "cohorts": rows,
@@ -383,6 +477,24 @@ def _trend_facts(series: pd.DataFrame, granularity: str, thin: bool) -> dict:
     return out
 
 
+def _voice_row(row) -> dict:
+    """One record as a quotable voice: the words, who said them, and the link."""
+    when = ""
+    if pd.notna(row.get("timestamp")):
+        when = pd.Timestamp(row["timestamp"]).strftime("%b %Y")
+    return {
+        "text": str(row.get("text") or "")[:400],
+        "author": str(row.get("author") or "anonymous"),
+        "date": when,
+        "engagement": _int(row.get("engagement") or 0),
+        "sentiment_label": str(row.get("sentiment_label") or ""),
+        "sentiment_score": _num(row.get("sentiment_score") or 0, 2),
+        "aspects": str(row.get("aspects") or ""),
+        "source": SOURCE_LABELS.get(row.get("source"), row.get("source")),
+        "url": str(row.get("url") or ""),
+    }
+
+
 def _voice_facts(df, limit: int = 3) -> dict:
     """Most-engaged supportive and critical mentions, as quotable evidence."""
     out = {"positive": [], "negative": []}
@@ -391,20 +503,43 @@ def _voice_facts(df, limit: int = 3) -> dict:
     for label in ("positive", "negative"):
         rows = (df[df["sentiment_label"] == label]
                 .sort_values("engagement", ascending=False).head(limit))
-        for _, row in rows.iterrows():
-            when = ""
-            if pd.notna(row.get("timestamp")):
-                when = pd.Timestamp(row["timestamp"]).strftime("%b %Y")
-            out[label].append({
-                "text": str(row.get("text") or "")[:400],
-                "author": str(row.get("author") or "anonymous"),
-                "date": when,
-                "engagement": _int(row.get("engagement") or 0),
-                "sentiment_score": _num(row.get("sentiment_score") or 0, 2),
-                "aspects": str(row.get("aspects") or ""),
-                "source": SOURCE_LABELS.get(row.get("source"), row.get("source")),
-                "url": str(row.get("url") or ""),
-            })
+        out[label] = [_voice_row(row) for _, row in rows.iterrows()]
+    return out
+
+
+def _theme_voices(df, aspects: list, *, themes: int = 5, per_side: int = 1) -> list:
+    """The loudest voice for and against each headline theme.
+
+    A theme reading "-18 net across 214 mentions" is a measurement; the comment
+    someone actually left is the evidence. This pairs every theme the report can
+    headline with the highest-engagement positive and negative comment that
+    raised it, so each finding in section 03 has a real excerpt sitting under it
+    rather than an aggregate on its own.
+
+    Selection is by engagement, not by how well the quote suits the argument —
+    the loudest voice on a theme is the one a visitor searching the destination
+    will actually meet, which is the whole reason it is worth quoting.
+    """
+    if df.empty or "aspects" not in df.columns or not aspects:
+        return []
+    ranked = sorted(aspects, key=lambda a: -(a["mentions"] or 0))
+    # Reportable themes first — those are the only ones allowed to headline a
+    # finding, so they are the ones that need evidence. With none reportable the
+    # busiest themes still get quoted, marked for what they are.
+    chosen = [a for a in ranked if a["reportable"]][:themes] or ranked[:themes]
+    tags = df["aspects"].fillna("").astype(str).str.split(",")
+    out = []
+    for row in chosen:
+        name = row["aspect"]
+        slice_ = df[tags.apply(lambda parts: name in [p.strip() for p in parts])]
+        quotes = {}
+        for label in ("positive", "negative"):
+            side = (slice_[slice_["sentiment_label"] == label]
+                    .sort_values("engagement", ascending=False).head(per_side))
+            quotes[label] = [_voice_row(r) for _, r in side.iterrows()]
+        if quotes["positive"] or quotes["negative"]:
+            out.append({"aspect": name, "mentions": row["mentions"],
+                        "reportable": row["reportable"], **quotes})
     return out
 
 
@@ -514,6 +649,7 @@ def build(df, *, country: str = "All", granularity: str = "Year",
         "meta": {
             "country": country,
             "period_label": period_label(lo, hi),
+            "review_label": review_label(lo, hi),
             "period_start": _month_name(lo),
             "period_end": _month_name(hi),
             "granularity": granularity.lower(),
@@ -526,6 +662,12 @@ def build(df, *, country: str = "All", granularity: str = "Year",
                 "gap_margin_points": rails.GAP_MARGIN,
                 "trend_margin_points": rails.TREND_MARGIN,
             },
+            # Every percentage in this pack, and what it is a share OF. A
+            # percentage restated without its denominator is the easiest number
+            # in a report to get wrong.
+            "percentage_bases": PCT_BASES,
+            "percentage_style": ("Write percentages as whole numbers with no "
+                                 "decimal place, and name what they are of."),
         },
         "volume": volume,
         "sentiment": _sentiment_facts(metrics),
@@ -535,6 +677,7 @@ def build(df, *, country: str = "All", granularity: str = "Year",
         "benchmark": benchmark,
         "trend": trend,
         "voices": _voice_facts(df),
+        "theme_voices": _theme_voices(df, aspects),
         "provenance": _provenance_facts(df, n, country) if n else
                       {"sources": [], "content_attributed_pct": None, "emotions": []},
     }

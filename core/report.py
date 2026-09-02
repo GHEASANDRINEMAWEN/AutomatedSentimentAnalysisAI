@@ -139,7 +139,7 @@ def chart_sentiment_breakdown(sentiment: dict) -> bytes:
                 color=SENTIMENT_COLORS[label], edgecolor="white", linewidth=1.5)
         if width >= 7:      # only label a segment wide enough to hold the text
             ax.text(left + width / 2, 0,
-                    f"{label}\n{width:.0f}%  ·  {counts[label]:,}",
+                    f"{label}\n{facts.pct(width)}  ·  {counts[label]:,}",
                     ha="center", va="center",
                     color=INK if label != "neutral" else "white",
                     fontsize=8.5, fontweight="bold", linespacing=1.4)
@@ -172,7 +172,7 @@ def chart_aspect_sentiment(aspects: list) -> bytes:
                 alpha=1.0)
         for i, (w, l, row) in enumerate(zip(widths, left, rows)):
             if w >= 12:
-                ax.text(l + w / 2, i, f"{w:.0f}%", ha="center", va="center",
+                ax.text(l + w / 2, i, facts.pct(w), ha="center", va="center",
                         color=INK if label != "neutral" else "white",
                         fontsize=7.5, fontweight="bold",
                         alpha=1.0 if row["reportable"] else 0.55)
@@ -395,9 +395,9 @@ def _metric_strip(pack: dict, styles, width):
     sent = pack["sentiment"]
     cells = [
         ("Records in view", f"{pack['volume']['records']:,}", INK),
-        ("Positive", f"{sent['positive_pct']:.0f}%", GREEN),
-        ("Neutral", f"{sent['neutral_pct']:.0f}%", GREY),
-        ("Negative", f"{sent['negative_pct']:.0f}%", RED),
+        ("Positive", facts.pct(sent["positive_pct"]), GREEN),
+        ("Neutral", facts.pct(sent["neutral_pct"]), GREY),
+        ("Negative", facts.pct(sent["negative_pct"]), RED),
         ("Perception", f"{sent['perception_score']}/100", INK),
     ]
     label_style = ParagraphStyle("ml", fontName="Helvetica", fontSize=7.0,
@@ -439,7 +439,18 @@ def _section_head(number: str, title: str, styles, width):
 
 def _data_note(text, styles, width):
     """Cream callout with a gold spine: where the evidence runs out."""
-    rows = [[Paragraph("DATA NOTE", styles["notelabel"])],
+    return _callout("DATA NOTE", text, styles, width)
+
+
+def _callout(label, text, styles, width):
+    """The house callout: a small caps label over a cream, gold-spined block.
+
+    Two things earn this treatment — a DATA NOTE, where the evidence runs out,
+    and a HOW THIS IS MEASURED note, where a figure means something narrower
+    than its name suggests. Both are the report qualifying itself, so both look
+    the same on the page.
+    """
+    rows = [[Paragraph(_rich(label), styles["notelabel"])],
             [Paragraph(_rich(text), styles["note"])]]
     table = Table(rows, colWidths=[width])
     table.setStyle(TableStyle([
@@ -470,22 +481,36 @@ def _figure(title, caption, png, styles, width):
                          _image(png, width)])
 
 
-def _voice_cards(voices: dict, styles, width):
-    """Quote cards for the most-engaged supportive and critical mentions."""
-    rows = []
-    for label in ("positive", "negative"):
-        accent = GREEN if label == "positive" else RED
-        for v in voices.get(label, [])[:2]:
-            meta = (f'<font color="{accent}"><b>{label.upper()}</b></font>'
-                    f'<font color="{GREY}"> &nbsp;·&nbsp; {_safe(v["author"], 40)}'
-                    f'{" · " + v["date"] if v["date"] else ""} &nbsp;·&nbsp; '
-                    f'{v["engagement"]:,} likes &nbsp;·&nbsp; '
-                    f'score {v["sentiment_score"]:+.2f}</font>')
-            rows.append([Paragraph(
-                f'<font size="7.2">{meta}</font><br/>'
-                f'“{_safe(v["text"], 300)}”', styles["quote"])])
-    if not rows:
-        return None
+def _source_link(v: dict) -> str:
+    """The record's source, hyperlinked to the comment itself where we have it.
+
+    A quote a reader cannot go and check is an assertion. The link makes every
+    excerpt in this report auditable back to the platform it came from.
+    """
+    source = _safe(v.get("source") or "source", 40)
+    url = str(v.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return source
+    return f'<link href="{_safe(url, 300)}"><u>{source}</u></link>'
+
+
+def _quote_card(v: dict, styles, *, label: str, theme: str = "") -> Paragraph:
+    """One comment as a quote card: who said it, how loud, and where to check."""
+    accent = GREEN if label == "positive" else RED
+    lead = f'<b>{_rich(theme.upper())}</b> &nbsp;·&nbsp; ' if theme else ""
+    meta = (f'<font color="{GREY}">{lead}</font>'
+            f'<font color="{accent}"><b>{label.upper()}</b></font>'
+            f'<font color="{GREY}"> &nbsp;·&nbsp; {_safe(v["author"], 40)}'
+            f'{" · " + v["date"] if v["date"] else ""} &nbsp;·&nbsp; '
+            f'{v["engagement"]:,} likes &nbsp;·&nbsp; '
+            f'score {v["sentiment_score"]:+.2f} &nbsp;·&nbsp; '
+            f'{_source_link(v)}</font>')
+    return Paragraph(f'<font size="7.2">{meta}</font><br/>'
+                     f'“{_safe(v["text"], 300)}”', styles["quote"])
+
+
+def _card_table(rows, width):
+    """Stack quote cards into one cream, hairline-ruled block."""
     table = Table(rows, colWidths=[width])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(CREAM)),
@@ -497,6 +522,31 @@ def _voice_cards(voices: dict, styles, width):
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
     return table
+
+
+def _theme_voice_cards(theme_voices: list, styles, width, *, themes: int = 4):
+    """A real excerpt for and against each theme the analysis headlines.
+
+    Section 03 argues theme by theme; without this it argues entirely in
+    aggregates. Each card is the highest-engagement comment on that theme from
+    that side — the one a visitor searching the destination actually meets.
+    """
+    rows = []
+    for row in (theme_voices or [])[:themes]:
+        for label in ("positive", "negative"):
+            for v in row.get(label, [])[:1]:
+                rows.append([_quote_card(v, styles, label=label,
+                                         theme=row["aspect"])])
+    return _card_table(rows, width) if rows else None
+
+
+def _voice_cards(voices: dict, styles, width):
+    """Quote cards for the most-engaged supportive and critical mentions."""
+    rows = []
+    for label in ("positive", "negative"):
+        for v in voices.get(label, [])[:2]:
+            rows.append([_quote_card(v, styles, label=label)])
+    return _card_table(rows, width) if rows else None
 
 
 def _peer_table(bench: dict, country: str, styles, width):
@@ -544,7 +594,8 @@ def _segment_table(segments: dict, styles, width):
     cohorts = segments.get("cohorts") or []
     if not cohorts:
         return None
-    header = ["Visitor segment", "Records", "Share of view", "Perception", "Net"]
+    header = ["Visitor segment", "Records", "Share of all records",
+              "Perception", "Net"]
     rows = [[Paragraph(h.upper(), styles["th"]) for h in header]]
     faded = []
     for i, c in enumerate(cohorts, start=1):
@@ -554,7 +605,10 @@ def _segment_table(segments: dict, styles, width):
             Paragraph(_rich(c["segment"].capitalize())
                       + ("" if c["reportable"] else "  · thin"), styles["td"]),
             Paragraph(f"{c['records']:,}", styles["td"]),
-            Paragraph(f"{c['share_of_view_pct']:.1f}%", styles["td"]),
+            # Whole numbers, like every other percentage in the report: this
+            # column printed one decimal place while the metric strip printed
+            # none, so the same kind of figure read as two kinds of precision.
+            Paragraph(facts.pct(c["share_of_view_pct"]), styles["td"]),
             Paragraph(f"{c['perception_score']}/100", styles["td"]),
             Paragraph(f"{c['net_sentiment']:+.0f}", styles["td"]),
         ])
@@ -626,11 +680,13 @@ def narrative(df, *, country: str = "All", granularity: str = "Year",
     pack = facts.build(df, country=country, granularity=granularity,
                        benchmark_df=benchmark_df)
     sections, _ = narrative_engine.template_sections(pack)
+    titles = narrative_engine.section_titles(pack)
     out = []
-    for sid, number, title, _brief in narrative_engine.SECTIONS:
+    for sid, number, _title, _brief in narrative_engine.SECTIONS:
         body = sections.get(sid)
         if body and body.get("prose"):
-            out.append((f"{number} — {title}", body["prose"].replace("\n\n", " ")))
+            out.append((f"{number} — {titles[sid]}",
+                        body["prose"].replace("\n\n", " ")))
     return out
 
 
@@ -666,7 +722,8 @@ def build_pdf(df, *, country: str = "All", granularity: str = "Year",
         sections, headline = narrative_engine.template_sections(pack)
         result = narrative_engine.NarrativeResult(
             sections, headline, "template",
-            ["Narrative written from the built-in template (Claude disabled)."])
+            ["Narrative written from the built-in template (Claude disabled)."],
+            narrative_engine.section_titles(pack))
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -692,7 +749,13 @@ def build_pdf(df, *, country: str = "All", granularity: str = "Year",
         return (buf.getvalue(), _diagnostics(pack, result)) if return_diagnostics \
             else buf.getvalue()
 
-    story += [_metric_strip(pack, styles, width), Spacer(1, 4)]
+    story += [_metric_strip(pack, styles, width)]
+    # The tiles are the most-read figures in the report and the only ones with
+    # no room to carry their own denominator, so it goes underneath them.
+    story += [Paragraph(
+        f"Positive, neutral and negative are shares of all "
+        f"{pack['volume']['records']:,} records in view. Perception is a 0-100 "
+        f"score where 50 is neutral.", styles["caption"]), Spacer(1, 4)]
 
     # Charts and tables are attached to the section that argues from them, so a
     # reader never has to hold a number in their head across a page turn.
@@ -700,19 +763,19 @@ def build_pdf(df, *, country: str = "All", granularity: str = "Year",
     attachments = {
         "perception_overview": lambda: [
             _figure("Figure 1 — Sentiment breakdown",
-                    f"How the {pack['volume']['records']:,} records in view split "
-                    f"across sentiment classes. Net sentiment is "
+                    f"How the {pack['volume']['records']:,} records in view "
+                    f"split across sentiment classes; each share is a percentage "
+                    f"of all records in view. Net sentiment is "
                     f"{pack['sentiment']['net_sentiment']:+.0f} points.",
                     chart_sentiment_breakdown(pack["sentiment"]), styles, width)],
         "thematic_analysis": _thematic_attachments(pack, styles, width),
-        "visitor_segments": lambda: _optional(
-            _segment_table(pack["segments"], styles, width)),
+        "visitor_segments": _segment_attachments(pack, styles, width),
         "competitive_benchmarking": lambda: _optional(
             _peer_table(pack["benchmark"], country, styles, width)),
         "trends_signals": _trend_attachments(pack, granularity_key, styles, width),
     }
 
-    for number, title, prose, notes in result.ordered():
+    for sid, number, title, prose, notes in result.ordered():
         head = [_section_head(number, title, styles, width), Spacer(1, 6)]
         paragraphs = [Paragraph(_rich(p), styles["body"])
                       for p in prose.split("\n\n") if p.strip()]
@@ -725,7 +788,7 @@ def build_pdf(df, *, country: str = "All", granularity: str = "Year",
             story.extend(head)
         for note in notes:
             story += [Spacer(1, 2), _data_note(note, styles, width), Spacer(1, 6)]
-        maker = attachments.get(_slug_of(title))
+        maker = attachments.get(sid)
         if maker:
             for element in maker():
                 story += [Spacer(1, 4), element]
@@ -748,9 +811,19 @@ def build_pdf(df, *, country: str = "All", granularity: str = "Year",
         lines.append("Evidence base: " + ", ".join(
             facts.source_phrase(s) for s in prov["sources"]) + ".")
     if prov["content_attributed_pct"] is not None:
-        lines.append(f"{prov['content_attributed_pct']:.0f}% of records were "
-                     f"attributed to this market from what the text itself is "
-                     f"about rather than from the query that surfaced them.")
+        lines.append(f"{facts.pct(prov['content_attributed_pct'])} of all "
+                     f"records in view were attributed to this market from what "
+                     f"the text itself is about rather than from the query that "
+                     f"surfaced them.")
+    lines.append(
+        "Percentages are written as whole numbers throughout, and each is stated "
+        "with what it is a share of: sentiment shares are of all records in "
+        "view, a theme's shares are of that theme's own mentions, and a cohort's "
+        "shares are of the records in that cohort. Shares on different "
+        "denominators are not comparable with one another.")
+    if pack["segments"].get("method"):
+        lines.append(pack["segments"]["method"] + " "
+                     + pack["segments"]["limitations"])
     lines.append(
         f"Sentiment is scored by a multilingual transformer; themes, emotion and "
         f"visitor segment are rule-based taggers. Evidence thresholds: "
@@ -775,25 +848,67 @@ def _optional(element):
     return [element] if element is not None else []
 
 
+def _segment_attachments(pack, styles, width):
+    """The cohort table, then the note on how the cohorts were inferred.
+
+    The note is not an appendix footnote: it sits directly under the figures it
+    qualifies, because a reader who takes "luxury travellers" for a surveyed
+    population will over-read every number in this section.
+    """
+    def make():
+        segments = pack["segments"]
+        out = []
+        table = _segment_table(segments, styles, width)
+        if table is not None:
+            out.append(KeepTogether([
+                Paragraph("Table 1 — Visitor segments", styles["figtitle"]),
+                Paragraph("Share of all records is that cohort's share of every "
+                          "record in view; perception and net sentiment are "
+                          "computed within the cohort itself. Cohorts below the "
+                          f"{MIN_SAMPLE}-record floor are faded and marked thin.",
+                          styles["caption"]),
+                table]))
+        if segments.get("method"):
+            out += [Spacer(1, 4),
+                    _callout("HOW VISITOR SEGMENTS ARE INFERRED",
+                             segments["method"] + " " + segments["limitations"],
+                             styles, width)]
+        return out
+    return make
+
+
 def _thematic_attachments(pack, styles, width):
     def make():
         out = []
         # Voices first: they follow directly from the prose that quotes them, and
         # being short they fill the tail of the page instead of leaving a gap
         # that the full-height theme chart could never fit into.
+        theme_cards = _theme_voice_cards(pack.get("theme_voices"), styles, width)
+        if theme_cards is not None:
+            out.append(KeepTogether([
+                Paragraph("Voices behind the numbers — by theme",
+                          styles["figtitle"]),
+                Paragraph("For each headline theme, the highest-engagement "
+                          "supportive and critical comment that raised it, with "
+                          "its sentiment and a link to the source. Emoji and "
+                          "non-Latin characters are stripped for print.",
+                          styles["caption"]),
+                theme_cards]))
         cards = _voice_cards(pack["voices"], styles, width)
         if cards is not None:
             out.append(KeepTogether([
-                Paragraph("Voices behind the numbers", styles["figtitle"]),
-                Paragraph("The most-engaged supportive and critical mentions in "
-                          "this view. Emoji and non-Latin characters are stripped "
-                          "for print.", styles["caption"]),
+                Paragraph("The loudest voices overall", styles["figtitle"]),
+                Paragraph("The most-engaged supportive and critical mentions "
+                          "anywhere in this view, whatever theme they raise.",
+                          styles["caption"]),
                 cards]))
         if pack["aspects"]:
             out.append(_figure(
                 "Figure 2 — Sentiment by theme",
                 "Every travel theme mentioned in this view, ranked by net "
-                "sentiment. Mention counts in brackets; themes below the "
+                "sentiment. Each bar is a percentage of that theme's own "
+                "mentions, not of the whole view, so bars are not comparable "
+                "in volume. Mention counts in brackets; themes below the "
                 f"{MIN_ASPECT_MENTIONS}-mention floor are faded and marked thin.",
                 chart_aspect_sentiment(pack["aspects"]), styles, width))
         return out
@@ -816,14 +931,6 @@ def _trend_attachments(pack, granularity, styles, width):
                     chart_volume(periods, granularity), styles, width),
         ]
     return make
-
-
-def _slug_of(title: str) -> str:
-    """Map a section title back to its id (the attachment lookup key)."""
-    for sid, _num, name, _brief in narrative_engine.SECTIONS:
-        if name == title:
-            return sid
-    return title.lower().replace(" ", "_")
 
 
 def _engine_label(engine: str) -> str:
